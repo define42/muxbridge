@@ -8,13 +8,19 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"flag"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/caddyserver/certmagic"
 )
 
 func TestLoadConfigDerivesEdgeDomainAndParsesCredentials(t *testing.T) {
@@ -174,6 +180,26 @@ func TestLoadConfigFlagOverridesEnvStaticTLSFiles(t *testing.T) {
 	}
 }
 
+func TestEdgeConfigManagedHostsAndSortedUsers(t *testing.T) {
+	t.Parallel()
+
+	cfg := edgeConfig{
+		PublicDomain: "example.com",
+		EdgeDomain:   "edge.example.com",
+		ClientCredentials: map[string]string{
+			"z-token": "zebra",
+			"a-token": "alpha",
+		},
+	}
+
+	if got := cfg.sortedUsers(); len(got) != 2 || got[0] != "alpha" || got[1] != "zebra" {
+		t.Fatalf("sortedUsers = %#v, want [alpha zebra]", got)
+	}
+	if got := cfg.managedHosts(); len(got) != 3 || got[0] != "edge.example.com" || got[1] != "alpha.example.com" || got[2] != "zebra.example.com" {
+		t.Fatalf("managedHosts = %#v, want edge/alpha/zebra", got)
+	}
+}
+
 func TestNewHTTPSHandlerDispatch(t *testing.T) {
 	t.Parallel()
 
@@ -267,6 +293,9 @@ func TestEdgeTLSConfigStaticCertificate(t *testing.T) {
 	if httpHandler == nil {
 		t.Fatal("expected http challenge handler")
 	}
+	if len(tlsConfig.NextProtos) != 2 || tlsConfig.NextProtos[0] != "h2" || tlsConfig.NextProtos[1] != "http/1.1" {
+		t.Fatalf("NextProtos = %#v, want [h2 http/1.1]", tlsConfig.NextProtos)
+	}
 }
 
 func TestEdgeTLSConfigStaticCertificateServesHTTPS(t *testing.T) {
@@ -355,6 +384,90 @@ func TestEdgeTLSConfigRejectsInvalidStaticCertificate(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected invalid static TLS certificate error")
+	}
+}
+
+func TestWrapHTTPChallengeFallsBackToNext(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	handler := wrapHTTPChallenge(&certmagic.Config{}, next)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if !called {
+		t.Fatal("expected next handler to be called")
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
+func TestRedirectToHTTPS(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/path?x=1", nil)
+	req.Host = "EXAMPLE.COM:80"
+	res := httptest.NewRecorder()
+
+	redirectToHTTPS(res, req)
+
+	if res.Code != http.StatusMovedPermanently {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusMovedPermanently)
+	}
+	if got := res.Header().Get("Location"); got != "https://example.com/path?x=1" {
+		t.Fatalf("Location = %q, want %q", got, "https://example.com/path?x=1")
+	}
+}
+
+func TestServeOrDieAllowsServerClosed(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen error: %v", err)
+	}
+	defer listener.Close()
+
+	serveOrDie("test", func(net.Listener) error {
+		return http.ErrServerClosed
+	}, listener)
+}
+
+func TestAppendMissingAndGetenv(t *testing.T) {
+	if got := appendMissing([]string{"h2"}, "h2", "http/1.1"); len(got) != 2 || got[0] != "h2" || got[1] != "http/1.1" {
+		t.Fatalf("appendMissing = %#v, want [h2 http/1.1]", got)
+	}
+
+	key := "MUXBRIDGE_EDGE_TEST_ENV"
+	t.Setenv(key, "  value  ")
+	if got := getenv(key); got != "value" {
+		t.Fatalf("getenv = %q, want %q", got, "value")
+	}
+}
+
+func TestMainRejectsInvalidConfigInHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_EDGE_HELPER_PROCESS") == "1" {
+		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+		_ = os.Setenv(publicDomainEnv, "localhost")
+		_ = os.Setenv(clientCredentialsEnv, "demo-token=demo")
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainRejectsInvalidConfigInHelperProcess")
+	cmd.Env = append(os.Environ(), "GO_WANT_EDGE_HELPER_PROCESS=1")
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Run error = %v, want ExitError", err)
 	}
 }
 
