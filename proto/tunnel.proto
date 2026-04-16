@@ -50,6 +50,15 @@ message CancelRequest {
   string request_id = 1;
 }
 
+message WebSocketData {
+  string request_id = 1;
+  bytes payload = 2;
+}
+
+message WebSocketClose {
+  string request_id = 1;
+}
+
 message ResponseStart {
   string request_id = 1;
   int32 status_code = 2;
@@ -78,6 +87,8 @@ message ClientFrame {
     ResponseBody response_body = 4;
     ResponseEnd response_end = 5;
     ResponseError response_error = 6;
+    WebSocketData ws_data = 7;
+    WebSocketClose ws_close = 8;
   }
 }
 
@@ -88,5 +99,7 @@ message ServerFrame {
     RequestEnd request_end = 3;
     CancelRequest cancel_request = 4;
     Ping ping = 5;
+    WebSocketData ws_data = 6;
+    WebSocketClose ws_close = 7;
   }
 }

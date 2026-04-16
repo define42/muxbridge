@@ -1,14 +1,17 @@
 package tunnel
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +47,46 @@ type inflightRequest struct {
 	cancel context.CancelFunc
 	bodyR  *io.PipeReader
 	bodyW  *io.PipeWriter
+}
+
+type oneConnListener struct {
+	ch   chan net.Conn
+	addr net.Addr
+	once sync.Once
+}
+
+func newOneConnListener(conn net.Conn) *oneConnListener {
+	l := &oneConnListener{ch: make(chan net.Conn, 1), addr: conn.LocalAddr()}
+	l.ch <- conn
+	return l
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	conn, ok := <-l.ch
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return conn, nil
+}
+
+func (l *oneConnListener) Close() error {
+	l.once.Do(func() { close(l.ch) })
+	return nil
+}
+
+func (l *oneConnListener) Addr() net.Addr { return l.addr }
+
+func isWebSocketUpgrade(start *tunnelpb.RequestStart) bool {
+	for _, h := range start.GetHeaders() {
+		if strings.EqualFold(h.GetKey(), "Upgrade") {
+			for _, v := range h.GetValues() {
+				if strings.EqualFold(v, "websocket") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func New(cfg Config) (*Client, error) {
@@ -148,6 +191,7 @@ func (c *Client) runSession(ctx context.Context) error {
 
 	var inflightMu sync.Mutex
 	inflight := make(map[string]*inflightRequest)
+	wsInbound := make(map[string]chan []byte)
 
 	getRequest := func(id string) *inflightRequest {
 		inflightMu.Lock()
@@ -166,6 +210,28 @@ func (c *Client) runSession(ctx context.Context) error {
 		delete(inflight, id)
 		return req
 	}
+	getWSInbound := func(id string) chan []byte {
+		inflightMu.Lock()
+		defer inflightMu.Unlock()
+		return wsInbound[id]
+	}
+	putWSInbound := func(id string, ch chan []byte) {
+		inflightMu.Lock()
+		defer inflightMu.Unlock()
+		wsInbound[id] = ch
+	}
+	deleteWSInbound := func(id string) {
+		inflightMu.Lock()
+		defer inflightMu.Unlock()
+		delete(wsInbound, id)
+	}
+	defer func() {
+		inflightMu.Lock()
+		for _, ch := range wsInbound {
+			close(ch)
+		}
+		inflightMu.Unlock()
+	}()
 
 	for {
 		frame, err := stream.Recv()
@@ -179,6 +245,16 @@ func (c *Client) runSession(ctx context.Context) error {
 		switch msg := frame.GetMsg().(type) {
 		case *tunnelpb.ServerFrame_RequestStart:
 			start := msg.RequestStart
+
+			if isWebSocketUpgrade(start) {
+				inbound := make(chan []byte, 16)
+				putWSInbound(start.GetRequestId(), inbound)
+				go c.handleWebSocket(ctx, start, inbound, send, func() {
+					deleteWSInbound(start.GetRequestId())
+				})
+				continue
+			}
+
 			bodyR, bodyW := io.Pipe()
 			reqCtx, cancel := context.WithCancel(ctx)
 
@@ -236,12 +312,141 @@ func (c *Client) runSession(ctx context.Context) error {
 			req.cancel()
 			_ = req.bodyW.CloseWithError(context.Canceled)
 
+		case *tunnelpb.ServerFrame_WsData:
+			if ch := getWSInbound(msg.WsData.GetRequestId()); ch != nil {
+				payload := append([]byte(nil), msg.WsData.GetPayload()...)
+				select {
+				case ch <- payload:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+
+		case *tunnelpb.ServerFrame_WsClose:
+			if ch := getWSInbound(msg.WsClose.GetRequestId()); ch != nil {
+				deleteWSInbound(msg.WsClose.GetRequestId())
+				close(ch)
+			}
+
 		case *tunnelpb.ServerFrame_Ping:
 			if err := send(&tunnelpb.ClientFrame{
 				Msg: &tunnelpb.ClientFrame_Pong{Pong: &tunnelpb.Pong{UnixNano: msg.Ping.GetUnixNano()}},
 			}); err != nil {
 				return err
 			}
+		}
+	}
+}
+
+func (c *Client) handleWebSocket(
+	ctx context.Context,
+	start *tunnelpb.RequestStart,
+	inbound <-chan []byte,
+	send func(*tunnelpb.ClientFrame) error,
+	done func(),
+) {
+	defer done()
+
+	requestID := start.GetRequestId()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	listener := newOneConnListener(serverConn)
+	srv := &http.Server{Handler: c.handler}
+	go srv.Serve(listener) //nolint:errcheck
+	defer func() {
+		listener.Close()
+		_ = srv.Shutdown(context.Background())
+	}()
+
+	req, err := http.NewRequest(start.GetMethod(), requestURL(start), http.NoBody)
+	if err != nil {
+		_ = send(&tunnelpb.ClientFrame{
+			Msg: &tunnelpb.ClientFrame_ResponseError{ResponseError: &tunnelpb.ResponseError{
+				RequestId: requestID, Message: err.Error(),
+			}},
+		})
+		return
+	}
+	req.Header = headers.FromProto(start.GetHeaders())
+	req.Host = start.GetHost()
+
+	if err := req.Write(clientConn); err != nil {
+		_ = send(&tunnelpb.ClientFrame{
+			Msg: &tunnelpb.ClientFrame_ResponseError{ResponseError: &tunnelpb.ResponseError{
+				RequestId: requestID, Message: err.Error(),
+			}},
+		})
+		return
+	}
+
+	br := bufio.NewReader(clientConn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		_ = send(&tunnelpb.ClientFrame{
+			Msg: &tunnelpb.ClientFrame_ResponseError{ResponseError: &tunnelpb.ResponseError{
+				RequestId: requestID, Message: err.Error(),
+			}},
+		})
+		return
+	}
+
+	if err := send(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseStart{ResponseStart: &tunnelpb.ResponseStart{
+			RequestId:  requestID,
+			StatusCode: int32(resp.StatusCode),
+			Headers:    headers.ToProto(resp.Header),
+		}},
+	}); err != nil {
+		return
+	}
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return
+	}
+
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := br.Read(buf)
+			if n > 0 {
+				payload := make([]byte, n)
+				copy(payload, buf[:n])
+				if sendErr := send(&tunnelpb.ClientFrame{
+					Msg: &tunnelpb.ClientFrame_WsData{WsData: &tunnelpb.WebSocketData{
+						RequestId: requestID, Payload: payload,
+					}},
+				}); sendErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				_ = send(&tunnelpb.ClientFrame{
+					Msg: &tunnelpb.ClientFrame_WsClose{WsClose: &tunnelpb.WebSocketClose{RequestId: requestID}},
+				})
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case payload, ok := <-inbound:
+			if !ok {
+				clientConn.Close()
+				<-readDone
+				return
+			}
+			if _, err := clientConn.Write(payload); err != nil {
+				return
+			}
+		case <-readDone:
+			return
+		case <-ctx.Done():
+			return
 		}
 	}
 }
