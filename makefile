@@ -26,3 +26,6 @@ $(BIN_DIR)/demo-client: $(PROTO_GEN)
 
 clean:
 	rm -rf $(BIN_DIR)
+
+test:
+	go test ./...

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -38,11 +39,6 @@ func main() {
 
 	httpsHandler := newHTTPSHandler(cfg.EdgeDomain, srv.HasPublicHost, srv, grpcServer)
 
-	certmagic.DefaultACME.Agreed = true
-	certmagic.DefaultACME.DisableTLSALPNChallenge = true
-
-	certConfig := certmagic.NewDefault()
-
 	httpListener, err := net.Listen("tcp", ":80")
 	if err != nil {
 		log.Fatal(err)
@@ -53,22 +49,13 @@ func main() {
 	}
 
 	httpServer := &http.Server{
-		Handler:           wrapHTTPChallenge(certConfig, http.HandlerFunc(redirectToHTTPS)),
+		Handler:           http.HandlerFunc(redirectToHTTPS),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
-	go serveOrDie("HTTP challenge", httpServer.Serve, httpListener)
-
-	managedHosts := cfg.managedHosts()
-	log.Printf("managing TLS certificates for %s", strings.Join(managedHosts, ", "))
-	if err := certConfig.ManageSync(context.Background(), managedHosts); err != nil {
-		log.Fatal(err)
-	}
-
-	tlsConfig := certConfig.TLSConfig()
-	tlsConfig.NextProtos = appendMissing(tlsConfig.NextProtos, "h2", "http/1.1")
+	go serveOrDie("HTTP", httpServer.Serve, httpListener)
 
 	httpsServer := &http.Server{
 		Handler:           httpsHandler,
@@ -76,14 +63,49 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       5 * time.Minute,
-		TLSConfig:         tlsConfig,
 	}
+	tlsConfig, httpHandler, err := edgeTLSConfig(context.Background(), cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	httpServer.Handler = httpHandler
+	httpsServer.TLSConfig = tlsConfig
 	if err := http2.ConfigureServer(httpsServer, &http2.Server{}); err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("edge listening on https://%s and http://:80 for ACME challenges", cfg.EdgeDomain)
+	log.Printf("edge listening on https://%s and http://:80", cfg.EdgeDomain)
 	log.Fatal(httpsServer.Serve(tls.NewListener(httpsListener, tlsConfig)))
+}
+
+func edgeTLSConfig(ctx context.Context, cfg edgeConfig) (*tls.Config, http.Handler, error) {
+	if cfg.TLSCertFile != "" {
+		tlsCert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load static TLS certificate: %w", err)
+		}
+
+		log.Printf("using static TLS certificate from %s and %s", cfg.TLSCertFile, cfg.TLSKeyFile)
+		return &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"h2", "http/1.1"},
+		}, http.HandlerFunc(redirectToHTTPS), nil
+	}
+
+	certmagic.DefaultACME.Agreed = true
+	certmagic.DefaultACME.DisableTLSALPNChallenge = true
+
+	certConfig := certmagic.NewDefault()
+	managedHosts := cfg.managedHosts()
+	log.Printf("managing TLS certificates for %s", strings.Join(managedHosts, ", "))
+	if err := certConfig.ManageSync(ctx, managedHosts); err != nil {
+		return nil, nil, err
+	}
+
+	tlsConfig := certConfig.TLSConfig()
+	tlsConfig.NextProtos = appendMissing(tlsConfig.NextProtos, "h2", "http/1.1")
+	return tlsConfig, wrapHTTPChallenge(certConfig, http.HandlerFunc(redirectToHTTPS)), nil
 }
 
 func newHTTPSHandler(edgeDomain string, isPublicHost func(string) bool, publicHandler http.Handler, grpcHandler http.Handler) http.Handler {

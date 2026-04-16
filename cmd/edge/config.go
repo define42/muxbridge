@@ -14,12 +14,16 @@ import (
 const (
 	publicDomainEnv      = "MUXBRIDGE_PUBLIC_DOMAIN"
 	clientCredentialsEnv = "MUXBRIDGE_CLIENT_CREDENTIALS"
+	tlsCertFileEnv       = "MUXBRIDGE_TLS_CERT_FILE"
+	tlsKeyFileEnv        = "MUXBRIDGE_TLS_KEY_FILE"
 )
 
 type edgeConfig struct {
 	PublicDomain      string
 	EdgeDomain        string
 	ClientCredentials map[string]string
+	TLSCertFile       string
+	TLSKeyFile        string
 }
 
 func (c edgeConfig) managedHosts() []string {
@@ -55,9 +59,13 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	fs.SetOutput(io.Discard)
 
 	var publicDomain string
+	var tlsCertFile string
+	var tlsKeyFile string
 	var credentialFlags repeatedFlag
 
 	fs.StringVar(&publicDomain, "public-domain", "", "Public base domain")
+	fs.StringVar(&tlsCertFile, "tls-cert-file", "", "Static TLS certificate PEM file")
+	fs.StringVar(&tlsKeyFile, "tls-key-file", "", "Static TLS private key PEM file")
 	fs.Var(&credentialFlags, "client-credential", "Client credential in token=username form")
 
 	if err := fs.Parse(args); err != nil {
@@ -67,9 +75,18 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	if publicDomain == "" {
 		publicDomain = getenv(publicDomainEnv)
 	}
+	if tlsCertFile == "" {
+		tlsCertFile = strings.TrimSpace(getenv(tlsCertFileEnv))
+	}
+	if tlsKeyFile == "" {
+		tlsKeyFile = strings.TrimSpace(getenv(tlsKeyFileEnv))
+	}
 	publicDomain = hostnames.NormalizeDomain(publicDomain)
 	if err := hostnames.ValidateDomain(publicDomain); err != nil {
 		return edgeConfig{}, fmt.Errorf("invalid public domain: %w", err)
+	}
+	if (tlsCertFile == "") != (tlsKeyFile == "") {
+		return edgeConfig{}, errors.New("tls-cert-file and tls-key-file must be provided together")
 	}
 
 	credentials, err := parseCredentials(getenv(clientCredentialsEnv), credentialFlags)
@@ -81,6 +98,8 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 		PublicDomain:      publicDomain,
 		EdgeDomain:        hostnames.Subdomain("edge", publicDomain),
 		ClientCredentials: credentials,
+		TLSCertFile:       tlsCertFile,
+		TLSKeyFile:        tlsKeyFile,
 	}, nil
 }
 
