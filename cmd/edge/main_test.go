@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -119,6 +120,60 @@ func TestLoadConfigRejectsDuplicateUsername(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsReservedUsername(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=edge",
+	}, func(string) string { return "" })
+	if err == nil {
+		t.Fatal("expected reserved username error")
+	}
+}
+
+func TestLoadConfigRejectsInvalidUsername(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo.user",
+	}, func(string) string { return "" })
+	if err == nil {
+		t.Fatal("expected invalid username error")
+	}
+}
+
+func TestLoadConfigFlagOverridesEnvStaticTLSFiles(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+		"--tls-cert-file", "/flag/cert.pem",
+		"--tls-key-file", "/flag/key.pem",
+	}, func(key string) string {
+		switch key {
+		case tlsCertFileEnv:
+			return "/env/cert.pem"
+		case tlsKeyFileEnv:
+			return "/env/key.pem"
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+
+	if cfg.TLSCertFile != "/flag/cert.pem" {
+		t.Fatalf("TLSCertFile = %q, want %q", cfg.TLSCertFile, "/flag/cert.pem")
+	}
+	if cfg.TLSKeyFile != "/flag/key.pem" {
+		t.Fatalf("TLSKeyFile = %q, want %q", cfg.TLSKeyFile, "/flag/key.pem")
+	}
+}
+
 func TestNewHTTPSHandlerDispatch(t *testing.T) {
 	t.Parallel()
 
@@ -186,7 +241,7 @@ func TestEdgeTLSConfigStaticCertificate(t *testing.T) {
 	tempDir := t.TempDir()
 	certFile := filepath.Join(tempDir, "cert.pem")
 	keyFile := filepath.Join(tempDir, "key.pem")
-	certPEM, keyPEM := mustGenerateTestCertificate(t)
+	certPEM, keyPEM := mustGenerateTestCertificate(t, "localhost")
 	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
 		t.Fatalf("write cert: %v", err)
 	}
@@ -214,7 +269,96 @@ func TestEdgeTLSConfigStaticCertificate(t *testing.T) {
 	}
 }
 
-func mustGenerateTestCertificate(t *testing.T) ([]byte, []byte) {
+func TestEdgeTLSConfigStaticCertificateServesHTTPS(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	certFile := filepath.Join(tempDir, "cert.pem")
+	keyFile := filepath.Join(tempDir, "key.pem")
+	certPEM, keyPEM := mustGenerateTestCertificate(t, "edge.example.com")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	tlsConfig, _, err := edgeTLSConfig(context.Background(), edgeConfig{
+		PublicDomain: "example.com",
+		EdgeDomain:   "edge.example.com",
+		TLSCertFile:  certFile,
+		TLSKeyFile:   keyFile,
+	})
+	if err != nil {
+		t.Fatalf("edgeTLSConfig error: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.TLS = tlsConfig.Clone()
+	server.StartTLS()
+	defer server.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to add certificate to root pool")
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    roots,
+				ServerName: "edge.example.com",
+			},
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = "edge.example.com"
+
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("https request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("status code = %d, want %d", res.StatusCode, http.StatusNoContent)
+	}
+	if res.TLS == nil {
+		t.Fatal("expected TLS connection state")
+	}
+}
+
+func TestEdgeTLSConfigRejectsInvalidStaticCertificate(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	certFile := filepath.Join(tempDir, "cert.pem")
+	keyFile := filepath.Join(tempDir, "key.pem")
+	if err := os.WriteFile(certFile, []byte("not a cert"), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, []byte("not a key"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	_, _, err := edgeTLSConfig(context.Background(), edgeConfig{
+		PublicDomain: "example.com",
+		EdgeDomain:   "edge.example.com",
+		TLSCertFile:  certFile,
+		TLSKeyFile:   keyFile,
+	})
+	if err == nil {
+		t.Fatal("expected invalid static TLS certificate error")
+	}
+}
+
+func mustGenerateTestCertificate(t *testing.T, dnsNames ...string) ([]byte, []byte) {
 	t.Helper()
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -232,7 +376,7 @@ func mustGenerateTestCertificate(t *testing.T) ([]byte, []byte) {
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
+		DNSNames:              dnsNames,
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
