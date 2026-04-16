@@ -3,22 +3,37 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
 
 	"github.com/define42/muxbridge/gen/tunnelpb"
 	"github.com/define42/muxbridge/internal/headers"
+	"github.com/define42/muxbridge/internal/hostnames"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-var errSessionClosed = errors.New("tunnel session closed")
+var (
+	errSessionClosed   = errors.New("tunnel session closed")
+	errSessionReplaced = errors.New("tunnel session replaced by a newer connection")
+)
+
+type Config struct {
+	PublicDomain string
+	TokenUsers   map[string]string
+}
 
 type Server struct {
 	tunnelpb.UnimplementedTunnelServiceServer
+
+	publicDomain string
+	tokenUsers   map[string]string
+	publicHosts  map[string]struct{}
 
 	mu            sync.RWMutex
 	sessions      map[string]*session
@@ -26,10 +41,11 @@ type Server struct {
 }
 
 type session struct {
-	tunnelID string
-	outbound chan *tunnelpb.ServerFrame
-	done     chan struct{}
-	once     sync.Once
+	publicHost string
+	username   string
+	outbound   chan *tunnelpb.ServerFrame
+	done       chan struct{}
+	once       sync.Once
 
 	mu       sync.Mutex
 	inflight map[string]*responseState
@@ -43,14 +59,74 @@ type responseState struct {
 	once  sync.Once
 }
 
-func New() *Server {
-	return &Server{
-		sessions: make(map[string]*session),
+func New(cfg Config) (*Server, error) {
+	publicDomain := hostnames.NormalizeDomain(cfg.PublicDomain)
+	if err := hostnames.ValidateDomain(publicDomain); err != nil {
+		return nil, fmt.Errorf("invalid public domain: %w", err)
 	}
+
+	tokenUsers := make(map[string]string, len(cfg.TokenUsers))
+	publicHosts := make(map[string]struct{}, len(cfg.TokenUsers))
+	userToToken := make(map[string]string, len(cfg.TokenUsers))
+
+	for token, username := range cfg.TokenUsers {
+		if token == "" {
+			return nil, errors.New("token must not be empty")
+		}
+
+		username = hostnames.NormalizeHost(username)
+		if err := hostnames.ValidateLabel(username); err != nil {
+			return nil, fmt.Errorf("invalid username %q: %w", username, err)
+		}
+		if username == "edge" {
+			return nil, errors.New(`username "edge" is reserved`)
+		}
+		if previousToken, ok := userToToken[username]; ok {
+			return nil, fmt.Errorf("duplicate username %q for tokens %q and %q", username, previousToken, token)
+		}
+
+		tokenUsers[token] = username
+		userToToken[username] = token
+		publicHosts[hostnames.Subdomain(username, publicDomain)] = struct{}{}
+	}
+
+	return &Server{
+		publicDomain: publicDomain,
+		tokenUsers:   tokenUsers,
+		publicHosts:  publicHosts,
+		sessions:     make(map[string]*session),
+	}, nil
+}
+
+func (s *Server) HasPublicHost(host string) bool {
+	host = hostnames.NormalizeHost(host)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.publicHosts[host]
+	return ok
+}
+
+func (s *Server) PublicHosts() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]string, 0, len(s.publicHosts))
+	for host := range s.publicHosts {
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.Host)
+	host := hostnames.NormalizeHost(r.Host)
+	if !s.HasPublicHost(host) {
+		http.NotFound(w, r)
+		return
+	}
+
+	sess := s.getSession(host)
 	if sess == nil {
 		http.Error(w, "no connected tunnel for host", http.StatusBadGateway)
 		return
@@ -96,8 +172,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		case <-state.done:
 			return
-		case err := <-state.err:
-			_ = err
+		case <-state.err:
 			return
 		case <-r.Context().Done():
 			s.cancelRequest(sess, requestID)
@@ -113,18 +188,28 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 	}
 
 	reg := first.GetRegister()
-	if reg == nil || reg.TunnelId == "" {
-		return status.Error(codes.InvalidArgument, "first frame must be a register frame with tunnel_id")
+	if reg == nil {
+		return status.Error(codes.InvalidArgument, "first frame must be a register frame")
+	}
+	if reg.Token == "" {
+		return status.Error(codes.Unauthenticated, "missing client token")
 	}
 
+	username, ok := s.tokenUsers[reg.Token]
+	if !ok {
+		return status.Error(codes.Unauthenticated, "invalid client token")
+	}
+
+	publicHost := hostnames.Subdomain(username, s.publicDomain)
 	sess := &session{
-		tunnelID: reg.TunnelId,
-		outbound: make(chan *tunnelpb.ServerFrame, 64),
-		done:     make(chan struct{}),
-		inflight: make(map[string]*responseState),
+		publicHost: publicHost,
+		username:   username,
+		outbound:   make(chan *tunnelpb.ServerFrame, 64),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
 	}
 	s.putSession(sess)
-	defer s.removeSession(sess.tunnelID, sess)
+	defer s.removeSession(sess.publicHost, sess)
 
 	sendErr := make(chan error, 1)
 	go func() {
@@ -286,22 +371,29 @@ func newResponseState() *responseState {
 }
 
 func (s *Server) putSession(sess *session) {
+	var replaced *session
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[sess.tunnelID] = sess
+	replaced = s.sessions[sess.publicHost]
+	s.sessions[sess.publicHost] = sess
+	s.mu.Unlock()
+
+	if replaced != nil && replaced != sess {
+		replaced.shutdown(errSessionReplaced)
+	}
 }
 
-func (s *Server) getSession(tunnelID string) *session {
+func (s *Server) getSession(publicHost string) *session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.sessions[tunnelID]
+	return s.sessions[publicHost]
 }
 
-func (s *Server) removeSession(tunnelID string, current *session) {
+func (s *Server) removeSession(publicHost string, current *session) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sessions[tunnelID] == current {
-		delete(s.sessions, tunnelID)
+	if s.sessions[publicHost] == current {
+		delete(s.sessions, publicHost)
 	}
 }
 
@@ -358,4 +450,6 @@ func (r *responseState) fail(err error) {
 }
 
 var _ http.Handler = (*Server)(nil)
-var _ interface{ Connect(tunnelpb.TunnelService_ConnectServer) error } = (*Server)(nil)
+var _ interface {
+	Connect(tunnelpb.TunnelService_ConnectServer) error
+} = (*Server)(nil)

@@ -50,11 +50,11 @@ func New(cfg Config) (*Client, error) {
 	if cfg.EdgeAddr == "" {
 		return nil, errors.New("EdgeAddr is required")
 	}
-	if cfg.TunnelID == "" {
-		return nil, errors.New("TunnelID is required")
-	}
 	if cfg.Handler == nil {
 		return nil, errors.New("Handler is required")
+	}
+	if cfg.Token == "" {
+		return nil, errors.New("Token is required")
 	}
 	if cfg.ReconnectBackoff <= 0 {
 		cfg.ReconnectBackoff = 2 * time.Second
