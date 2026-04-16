@@ -28,4 +28,4 @@ clean:
 	rm -rf $(BIN_DIR)
 
 test:
-	go test ./...
+	go test ./... -cover
