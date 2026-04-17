@@ -1,9 +1,37 @@
 # muxbridge
 [![codecov](https://codecov.io/gh/define42/muxbridge/graph/badge.svg?token=V3CLO9YG7H)](https://codecov.io/gh/define42/muxbridge)
 
-MuxBridge exposes an HTTP server running behind a client over a gRPC tunnel.
+MuxBridge is a self-hosted HTTP tunnel inspired by [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). It lets you securely expose HTTP services running behind NAT or a firewall to the public internet — no inbound firewall rules or port forwarding required.
 
-The edge server accepts authenticated client connections on `edge.<public-domain>` and publishes each connected client at `<username>.<public-domain>`.
+## How It Works
+
+```
+Browser ──HTTPS──▶ Edge Server (public) ──gRPC tunnel──▶ Client (private network) ──▶ Local HTTP app
+```
+
+You run an **edge server** on a public host. Your **client** — sitting behind NAT, a corporate firewall, or any private network — connects outbound to the edge over a persistent gRPC stream. The edge then forwards incoming HTTP requests through that stream to the client, which answers them using its local HTTP handler. Responses travel back the same way.
+
+No VPN. No open ports on the client machine. Just an outbound gRPC connection.
+
+### Key features
+
+- **Token-based authentication** — each client authenticates with a secret token; the edge maps tokens to usernames
+- **Automatic subdomain routing** — a client registered as `demo` is published at `demo.<public-domain>`
+- **WebSocket support** — upgraded connections are proxied as bidirectional byte streams
+- **Automatic TLS** — edge uses [CertMagic](https://github.com/caddyserver/certmagic) for automatic ACME certificate provisioning, or you can supply your own cert/key
+- **Multiplexed requests** — multiple in-flight HTTP requests share a single gRPC stream, correlated by request ID
+- **Reconnect on disconnect** — clients automatically reconnect with configurable backoff
+
+### Compared to Cloudflare Tunnel
+
+| | Cloudflare Tunnel | MuxBridge |
+|---|---|---|
+| Control plane | Cloudflare's network | Your own edge server |
+| Protocol | QUIC / HTTP/2 | gRPC over HTTP/2 |
+| TLS | Cloudflare-managed | CertMagic (ACME) or static cert |
+| Auth | Cloudflare Access | Token → username mapping |
+| WebSocket | Yes | Yes |
+| Self-hostable | No | Yes |
 
 ## Build
 
@@ -211,3 +239,32 @@ bin/demo-client \
 ```text
 https://demo.example.com/
 ```
+
+## Docker
+
+A minimal Alpine-based image is provided. The edge binary is the entrypoint and exposes ports `80` and `443`. CertMagic data and config directories are configured via:
+
+```text
+XDG_DATA_HOME=/var/lib/muxbridge
+XDG_CONFIG_HOME=/etc/muxbridge
+```
+
+## Using the Tunnel Package
+
+To expose your own `http.Handler` instead of the demo app, import the `tunnel` package:
+
+```go
+import "github.com/define42/muxbridge/tunnel"
+
+client := tunnel.NewClient(tunnel.Config{
+    EdgeAddr: "edge.example.com:443",
+    Token:    "my-secret-token",
+    Handler:  myHandler,
+})
+
+if err := client.Run(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+The client automatically reconnects on disconnect with a configurable backoff (default 2 s).
