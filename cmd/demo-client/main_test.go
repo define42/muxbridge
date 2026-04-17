@@ -94,13 +94,14 @@ func TestNewDemoMuxHandlers(t *testing.T) {
 	mux := newDemoMux()
 
 	rootReq := httptest.NewRequest(http.MethodGet, "http://demo.example.com/", nil)
+	rootReq.RemoteAddr = "203.0.113.10:4321"
 	rootRes := httptest.NewRecorder()
 	mux.ServeHTTP(rootRes, rootReq)
 	if rootRes.Code != http.StatusOK {
 		t.Fatalf("/ status = %d, want %d", rootRes.Code, http.StatusOK)
 	}
-	if rootRes.Body.String() != "hello through grpc tunnel\n" {
-		t.Fatalf("/ body = %q, want greeting", rootRes.Body.String())
+	if rootRes.Body.String() != "hello through grpc tunnel\nremote ip: 203.0.113.10\n" {
+		t.Fatalf("/ body = %q, want greeting plus remote ip", rootRes.Body.String())
 	}
 
 	previousDelay := slowChunkDelay
@@ -115,6 +116,23 @@ func TestNewDemoMuxHandlers(t *testing.T) {
 	}
 	if got := slowRes.Body.String(); got != "chunk 1\nchunk 2\nchunk 3\nchunk 4\nchunk 5\n" {
 		t.Fatalf("/slow body = %q, want five chunks", got)
+	}
+}
+
+func TestRemoteIPFromAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"":                  "unknown",
+		"203.0.113.10:443":  "203.0.113.10",
+		"[2001:db8::1]:443": "2001:db8::1",
+		"203.0.113.10":      "203.0.113.10",
+	}
+
+	for input, want := range tests {
+		if got := remoteIPFromAddr(input); got != want {
+			t.Fatalf("remoteIPFromAddr(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

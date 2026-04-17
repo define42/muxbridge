@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -105,7 +106,7 @@ func newDemoMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("hello through grpc tunnel\n"))
+		_, _ = fmt.Fprintf(w, "hello through grpc tunnel\nremote ip: %s\n", remoteIPFromAddr(r.RemoteAddr))
 	})
 	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -134,6 +135,18 @@ func parseBoolString(value string) bool {
 	default:
 		return false
 	}
+}
+
+func remoteIPFromAddr(remoteAddr string) string {
+	remoteAddr = strings.TrimSpace(remoteAddr)
+	if remoteAddr == "" {
+		return "unknown"
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return remoteAddr
 }
 
 func getenv(key string) string {
