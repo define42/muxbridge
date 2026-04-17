@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/define42/muxbridge/gen/tunnelpb"
 	"github.com/define42/muxbridge/internal/headers"
@@ -23,6 +25,12 @@ var (
 	errSessionClosed   = errors.New("tunnel session closed")
 	errSessionReplaced = errors.New("tunnel session replaced by a newer connection")
 )
+
+// wsWriteTimeout bounds how long a hijacked WebSocket write from the edge to
+// the browser may block. If exceeded the connection is torn down, so that a
+// slow browser cannot stall delivery of frames for other requests sharing
+// the same tunnel session.
+const wsWriteTimeout = 30 * time.Second
 
 type Config struct {
 	PublicDomain string
@@ -170,7 +178,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	case <-state.done:
-		w.WriteHeader(http.StatusOK)
+		// The client finished without sending ResponseStart. If an error was
+		// reported, surface it; otherwise treat the empty response as a 502
+		// so the browser doesn't see a bogus 200.
+		if err := state.consumeErr(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		http.Error(w, "tunnel closed response before sending headers", http.StatusBadGateway)
 		return
 	case <-r.Context().Done():
 		s.cancelRequest(sess, requestID)
@@ -182,14 +197,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		select {
 		case chunk := <-state.body:
 			if len(chunk) > 0 {
-				_, _ = w.Write(chunk)
+				if _, err := w.Write(chunk); err != nil {
+					s.cancelRequest(sess, requestID)
+					return
+				}
 				if flusher != nil {
 					flusher.Flush()
 				}
 			}
 		case <-state.done:
-			return
-		case <-state.err:
+			if err := state.consumeErr(); err != nil {
+				// Headers have already been written; the body is truncated.
+				// Log so operators can diagnose and stop reading to signal
+				// failure downstream.
+				log.Printf("muxbridge: request %s failed after headers: %v", requestID, err)
+			}
 			return
 		case <-r.Context().Done():
 			s.cancelRequest(sess, requestID)
@@ -313,7 +335,19 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 	for {
 		select {
 		case data := <-ws.fromClient:
+			// Bound the time a slow browser can block this write so a stalled
+			// WebSocket does not hold up the hijacked connection indefinitely.
+			// If the deadline cannot be set (e.g. the connection is already
+			// closed) or the write fails, we tear down; that closes ws.done
+			// and unblocks the session-level receiver, avoiding head-of-line
+			// blocking across other multiplexed requests on the same tunnel.
+			if err := conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout)); err != nil {
+				return
+			}
 			if _, err := conn.Write(data); err != nil {
+				return
+			}
+			if err := conn.SetWriteDeadline(time.Time{}); err != nil {
 				return
 			}
 		case <-ws.done:
@@ -655,6 +689,17 @@ func (r *responseState) fail(err error) {
 		}
 		close(r.done)
 	})
+}
+
+// consumeErr returns any error delivered via fail() without blocking.
+// It must only be called after done has been observed closed.
+func (r *responseState) consumeErr() error {
+	select {
+	case err := <-r.err:
+		return err
+	default:
+		return nil
+	}
 }
 
 var _ http.Handler = (*Server)(nil)

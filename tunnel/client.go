@@ -24,6 +24,16 @@ import (
 
 var errSessionEnded = errors.New("tunnel session ended")
 
+// ioBufSize is the chunk size used when reading request/response bodies and
+// WebSocket frames. 32 KiB matches the default bufio reader size and
+// balances throughput against per-frame overhead.
+const ioBufSize = 32 * 1024
+
+// wsShutdownTimeout bounds how long the embedded http.Server spun up for a
+// WebSocket upgrade is given to drain during teardown. It is deliberately
+// short so a misbehaving handler cannot stall session cleanup.
+const wsShutdownTimeout = 5 * time.Second
+
 type Config struct {
 	EdgeAddr         string
 	TunnelID         string
@@ -31,7 +41,11 @@ type Config struct {
 	Handler          http.Handler
 	Insecure         bool
 	ReconnectBackoff time.Duration
-	Logger           *log.Logger
+	// DialTimeout bounds how long a single connect attempt may block before
+	// the reconnect loop gets a chance to try again. Defaults to 10 seconds
+	// when not set.
+	DialTimeout time.Duration
+	Logger      *log.Logger
 }
 
 type Client struct {
@@ -104,6 +118,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.ReconnectBackoff <= 0 {
 		cfg.ReconnectBackoff = 2 * time.Second
+	}
+	if cfg.DialTimeout <= 0 {
+		cfg.DialTimeout = 10 * time.Second
 	}
 	return &Client{
 		cfg:     cfg,
@@ -179,7 +196,11 @@ func (c *Client) runSession(ctx context.Context) error {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})))
 	}
 
-	conn, err := grpc.DialContext(ctx, c.cfg.EdgeAddr, dialOpts...)
+	// Bound the dial so that an unreachable edge does not trap the reconnect
+	// loop indefinitely — the parent context may still be long-lived.
+	dialCtx, dialCancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
+	defer dialCancel()
+	conn, err := grpc.DialContext(dialCtx, c.cfg.EdgeAddr, dialOpts...)
 	if err != nil {
 		return err
 	}
@@ -387,7 +408,9 @@ func (c *Client) handleWebSocket(
 	go srv.Serve(listener) //nolint:errcheck
 	defer func() {
 		_ = listener.Close()
-		_ = srv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), wsShutdownTimeout)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
 	req, err := http.NewRequest(start.GetMethod(), requestURL(start), http.NoBody)
@@ -433,13 +456,43 @@ func (c *Client) handleWebSocket(
 	}
 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
+		// The handler refused the upgrade. Forward its response body so the
+		// browser sees the reason (e.g., a rendered 403/404 page) instead of
+		// an empty body, then close out the request cleanly.
+		if resp.Body != nil {
+			buf := make([]byte, ioBufSize)
+			for {
+				n, readErr := resp.Body.Read(buf)
+				if n > 0 {
+					payload := make([]byte, n)
+					copy(payload, buf[:n])
+					if sendErr := send(&tunnelpb.ClientFrame{
+						Msg: &tunnelpb.ClientFrame_ResponseBody{ResponseBody: &tunnelpb.ResponseBody{
+							RequestId: requestID, Chunk: payload,
+						}},
+					}); sendErr != nil {
+						_ = resp.Body.Close()
+						return
+					}
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			_ = resp.Body.Close()
+		}
+		_ = send(&tunnelpb.ClientFrame{
+			Msg: &tunnelpb.ClientFrame_ResponseEnd{ResponseEnd: &tunnelpb.ResponseEnd{
+				RequestId: requestID,
+			}},
+		})
 		return
 	}
 
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
-		buf := make([]byte, 32*1024)
+		buf := make([]byte, ioBufSize)
 		for {
 			n, err := br.Read(buf)
 			if n > 0 {
