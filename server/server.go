@@ -426,8 +426,12 @@ func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string
 			_ = r.Body.Close()
 		}()
 
+		ctx := r.Context()
 		buf := make([]byte, 32*1024)
 		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			n, err := r.Body.Read(buf)
 			if n > 0 {
 				chunk := append([]byte(nil), buf[:n]...)
@@ -509,9 +513,17 @@ func (s *Server) sendFrame(sess *session, frame *tunnelpb.ServerFrame) error {
 }
 
 func (s *Server) cancelRequest(sess *session, requestID string) {
-	_ = s.sendFrame(sess, &tunnelpb.ServerFrame{
+	frame := &tunnelpb.ServerFrame{
 		Msg: &tunnelpb.ServerFrame_CancelRequest{CancelRequest: &tunnelpb.CancelRequest{RequestId: requestID}},
-	})
+	}
+	// Best-effort: if the session is already closed or its outbound queue is
+	// full, drop the cancel frame. Blocking here would prevent the caller
+	// (typically an aborting HTTP handler) from making forward progress.
+	select {
+	case <-sess.done:
+	case sess.outbound <- frame:
+	default:
+	}
 }
 
 func schemeOf(r *http.Request) string {

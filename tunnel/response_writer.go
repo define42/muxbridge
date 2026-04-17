@@ -70,7 +70,18 @@ func (w *tunnelResponseWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (w *tunnelResponseWriter) Flush() { _ = w.header }
+// Flush ensures response headers are flushed to the edge. Each call to Write
+// already sends a ResponseBody frame immediately, so there's nothing to
+// buffer; however callers that invoke Flush before any Write expect the
+// headers to have been sent, so trigger WriteHeader lazily.
+func (w *tunnelResponseWriter) Flush() {
+	w.mu.Lock()
+	needHeader := !w.wroteHeader && !w.ended
+	w.mu.Unlock()
+	if needHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+}
 
 func (w *tunnelResponseWriter) Finish() error {
 	w.mu.Lock()
