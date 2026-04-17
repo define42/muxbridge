@@ -149,6 +149,8 @@ MUXBRIDGE_TLS_KEY_FILE
 demo-token=demo,admin-token=admin
 ```
 
+Because entries are comma-separated, tokens supplied via `MUXBRIDGE_CLIENT_CREDENTIALS` must not contain `,`. Tokens that contain commas must be provided via repeated `--client-credential` flags instead.
+
 Flag credential entries are appended after environment entries. Credential values are trimmed, usernames are normalized to lowercase before validation, and startup fails on malformed entries, duplicate tokens, duplicate usernames, invalid usernames, usernames with ports such as `demo:443`, or reserved username `edge`.
 
 ## Running The Edge
@@ -259,11 +261,14 @@ To expose your own `http.Handler` instead of the demo app, import the `tunnel` p
 ```go
 import "github.com/define42/muxbridge/tunnel"
 
-client := tunnel.NewClient(tunnel.Config{
+client, err := tunnel.New(tunnel.Config{
     EdgeAddr: "edge.example.com:443",
     Token:    "my-secret-token",
     Handler:  myHandler,
 })
+if err != nil {
+    log.Fatal(err)
+}
 
 if err := client.Run(ctx); err != nil {
     log.Fatal(err)
@@ -294,11 +299,14 @@ func main() {
 		fmt.Fprintln(w, "Hello, World!")
 	})
 
-	client := tunnel.NewClient(tunnel.Config{
+	client, err := tunnel.New(tunnel.Config{
 		EdgeAddr: "edge.example.com:443",
 		Token:    "my-secret-token",
 		Handler:  mux,
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if err := client.Run(context.Background()); err != nil {
 		log.Fatal(err)

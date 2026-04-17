@@ -1,6 +1,9 @@
 package hostnames
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeHostAndDomain(t *testing.T) {
 	t.Parallel()
@@ -44,7 +47,7 @@ func TestValidateLabel(t *testing.T) {
 		}
 	}
 
-	invalid := []string{"", "-demo", "demo-", "demo.user", "demo_user"}
+	invalid := []string{"", "-demo", "demo-", "demo.user", "demo_user", strings.Repeat("a", 64)}
 	for _, label := range invalid {
 		if err := ValidateLabel(label); err == nil {
 			t.Fatalf("ValidateLabel(%q) succeeded, want error", label)

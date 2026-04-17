@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/caddyserver/certmagic"
@@ -18,6 +20,7 @@ import (
 	"github.com/define42/muxbridge/server"
 	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 type edgeTLSAssets struct {
@@ -26,10 +29,43 @@ type edgeTLSAssets struct {
 	manage      func(context.Context) error
 }
 
+const (
+	// maxGRPCMessageBytes caps the size of a single gRPC frame processed by
+	// the edge's TunnelService. Individual request/response bodies are
+	// streamed in 32 KiB chunks (see server.forwardRequest), so this
+	// accommodates large headers and a safety margin without allowing an
+	// abusive client to send arbitrarily large frames.
+	maxGRPCMessageBytes = 4 * 1024 * 1024
+
+	// gRPC keepalive tuning detects dead tunnels behind NATs while not being
+	// so aggressive that well-behaved but quiet sessions get torn down.
+	grpcServerKeepaliveTime    = 30 * time.Second
+	grpcServerKeepaliveTimeout = 20 * time.Second
+	grpcClientMinKeepaliveTime = 10 * time.Second
+)
+
 func main() {
-	if err := run(context.Background(), nil, getenv, nil, nil); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, nil, getenv, nil, nil); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
+}
+
+func newEdgeGRPCServer() *grpc.Server {
+	return grpc.NewServer(
+		grpc.MaxRecvMsgSize(maxGRPCMessageBytes),
+		grpc.MaxSendMsgSize(maxGRPCMessageBytes),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    grpcServerKeepaliveTime,
+			Timeout: grpcServerKeepaliveTimeout,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             grpcClientMinKeepaliveTime,
+			PermitWithoutStream: true,
+		}),
+	)
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, httpListener, httpsListener net.Listener) error {
@@ -46,7 +82,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 		return err
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := newEdgeGRPCServer()
 	tunnelpb.RegisterTunnelServiceServer(grpcServer, srv)
 
 	httpsHandler := newHTTPSHandler(cfg.EdgeDomain, srv.HasPublicHost, srv, grpcServer)
@@ -103,10 +139,31 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 	select {
 	case err := <-serveErr:
 		_ = shutdownServers(httpServer, httpsServer)
+		gracefulStopGRPC(grpcServer)
 		return err
 	case <-ctx.Done():
 		_ = shutdownServers(httpServer, httpsServer)
+		gracefulStopGRPC(grpcServer)
 		return ctx.Err()
+	}
+}
+
+// gracefulStopGRPC drains in-flight streams with a timeout, then forces the
+// server down. It is safe to call even if the server has already stopped.
+func gracefulStopGRPC(s *grpc.Server) {
+	if s == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		s.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		s.Stop()
+		<-done
 	}
 }
 

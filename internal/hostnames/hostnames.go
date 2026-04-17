@@ -49,6 +49,9 @@ func ValidateLabel(label string) error {
 	if label == "" {
 		return fmt.Errorf("label is empty")
 	}
+	if len(label) > 63 {
+		return fmt.Errorf("label %q exceeds the 63 character DNS limit", label)
+	}
 
 	for i, r := range label {
 		switch {
