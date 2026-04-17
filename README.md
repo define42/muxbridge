@@ -1,5 +1,5 @@
 # muxbridge
-
+[![codecov](https://codecov.io/gh/define42/muxbridge/graph/badge.svg?token=V3CLO9YG7H)](https://codecov.io/gh/define42/muxbridge)
 MuxBridge exposes an HTTP server running behind a client over a gRPC tunnel.
 
 The edge server accepts authenticated client connections on `edge.<public-domain>` and publishes each connected client at `<username>.<public-domain>`.
