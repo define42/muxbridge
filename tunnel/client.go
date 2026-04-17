@@ -114,6 +114,13 @@ func New(cfg Config) (*Client, error) {
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	c.mu.Lock()
+	if c.closeCh == nil {
+		c.closeCh = make(chan struct{})
+	}
+	closeCh := c.closeCh
+	c.mu.Unlock()
+
 	for {
 		err := c.runSession(ctx)
 		if ctx.Err() != nil {
@@ -131,7 +138,7 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
-		case <-c.closeCh:
+		case <-closeCh:
 			timer.Stop()
 			return nil
 		case <-timer.C:
