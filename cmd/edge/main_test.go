@@ -661,6 +661,42 @@ func TestRunReturnsServeErrorFromClosedListener(t *testing.T) {
 	}
 }
 
+func TestNewServerHelpersUseStreamingSafeTimeouts(t *testing.T) {
+	t.Parallel()
+
+	httpServer := newRedirectHTTPServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if httpServer.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("http ReadHeaderTimeout = %v, want %v", httpServer.ReadHeaderTimeout, 5*time.Second)
+	}
+	if httpServer.ReadTimeout != 10*time.Second {
+		t.Fatalf("http ReadTimeout = %v, want %v", httpServer.ReadTimeout, 10*time.Second)
+	}
+	if httpServer.WriteTimeout != 10*time.Second {
+		t.Fatalf("http WriteTimeout = %v, want %v", httpServer.WriteTimeout, 10*time.Second)
+	}
+	if httpServer.IdleTimeout != 30*time.Second {
+		t.Fatalf("http IdleTimeout = %v, want %v", httpServer.IdleTimeout, 30*time.Second)
+	}
+
+	tlsConfig := &tls.Config{}
+	httpsServer := newPublicHTTPSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), tlsConfig)
+	if httpsServer.ReadHeaderTimeout != 10*time.Second {
+		t.Fatalf("https ReadHeaderTimeout = %v, want %v", httpsServer.ReadHeaderTimeout, 10*time.Second)
+	}
+	if httpsServer.ReadTimeout != 0 {
+		t.Fatalf("https ReadTimeout = %v, want 0", httpsServer.ReadTimeout)
+	}
+	if httpsServer.WriteTimeout != 0 {
+		t.Fatalf("https WriteTimeout = %v, want 0", httpsServer.WriteTimeout)
+	}
+	if httpsServer.IdleTimeout != 5*time.Minute {
+		t.Fatalf("https IdleTimeout = %v, want %v", httpsServer.IdleTimeout, 5*time.Minute)
+	}
+	if httpsServer.TLSConfig != tlsConfig {
+		t.Fatal("https TLSConfig pointer was not preserved")
+	}
+}
+
 func TestMainRejectsInvalidConfigInHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_EDGE_HELPER_PROCESS") == "1" {
 		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)

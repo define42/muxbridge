@@ -105,21 +105,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 		}
 	}
 
-	httpServer := &http.Server{
-		Handler:           tlsAssets.httpHandler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       30 * time.Second,
-	}
-	httpsServer := &http.Server{
-		Handler:           httpsHandler,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      2 * time.Minute,
-		IdleTimeout:       5 * time.Minute,
-		TLSConfig:         tlsAssets.tlsConfig,
-	}
+	httpServer := newRedirectHTTPServer(tlsAssets.httpHandler)
+	httpsServer := newPublicHTTPSServer(httpsHandler, tlsAssets.tlsConfig)
 	if err := http2.ConfigureServer(httpsServer, &http2.Server{}); err != nil {
 		_ = httpListener.Close()
 		_ = httpsListener.Close()
@@ -145,6 +132,29 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 		_ = shutdownServers(httpServer, httpsServer)
 		gracefulStopGRPC(grpcServer)
 		return ctx.Err()
+	}
+}
+
+func newRedirectHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+}
+
+func newPublicHTTPSServer(handler http.Handler, tlsConfig *tls.Config) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		// Leave ReadTimeout and WriteTimeout unset here. The HTTPS listener
+		// serves long-lived gRPC tunnel streams and proxied streaming
+		// responses, and server-wide deadlines would tear those down even when
+		// the session is healthy.
+		IdleTimeout: 5 * time.Minute,
+		TLSConfig:   tlsConfig,
 	}
 }
 
