@@ -188,7 +188,9 @@ func TestServeWebSocketProxiesFrames(t *testing.T) {
 	srv.putSession(sess)
 
 	browserConn, serverSide := net.Pipe()
-	defer browserConn.Close()
+	defer func() {
+		_ = browserConn.Close()
+	}()
 
 	hw := &hijackableWriter{ResponseRecorder: httptest.NewRecorder(), conn: serverSide}
 	req := newWSRequest("demo.example.com")
@@ -292,7 +294,7 @@ func TestServeWebSocketSendsWsCloseWhenBrowserDisconnects(t *testing.T) {
 	skipHTTP101Headers(t, browserConn)
 
 	// Closing the browser connection should trigger a WsClose toward the tunnel client.
-	browserConn.Close()
+	_ = browserConn.Close()
 
 	select {
 	case frame := <-sess.outbound:

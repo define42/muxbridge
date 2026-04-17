@@ -32,6 +32,9 @@ No VPN. No open ports on the client machine. Just an outbound gRPC connection.
 | Auth | Cloudflare Access | Token → username mapping |
 | WebSocket | Yes | Yes |
 | Self-hostable | No | Yes |
+| Client deployment | Separate `cloudflared` daemon | Embeddable Go library — add `tunnel.NewClient(...)` directly to your app |
+
+Cloudflare Tunnel requires you to install and run a separate `cloudflared` process on every network where you want to expose a service. MuxBridge ships a Go library so you can embed the tunnel client directly into your own application — no sidecar, no external process, no extra deployment step. Your app dials the edge and serves traffic through its own `http.Handler`.
 
 ## Build
 

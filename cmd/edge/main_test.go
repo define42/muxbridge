@@ -403,7 +403,11 @@ func TestEdgeTLSConfigStaticCertificateServesHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("https request failed: %v", err)
 	}
-	defer res.Body.Close()
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			t.Errorf("closing response body: %v", err)
+		}
+	}()
 
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("status code = %d, want %d", res.StatusCode, http.StatusNoContent)
@@ -483,7 +487,9 @@ func TestServeOrDieAllowsServerClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen error: %v", err)
 	}
-	defer listener.Close()
+	defer func() {
+		_ = listener.Close()
+	}()
 
 	serveOrDie("test", func(net.Listener) error {
 		return http.ErrServerClosed
@@ -497,7 +503,9 @@ func TestServeOnceReturnsUnexpectedError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen error: %v", err)
 	}
-	defer listener.Close()
+	defer func() {
+		_ = listener.Close()
+	}()
 
 	got := serveOnce("test", func(net.Listener) error {
 		return errors.New("boom")
@@ -537,12 +545,16 @@ func TestRunServesStaticTLSAndRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen HTTP error: %v", err)
 	}
-	defer httpListener.Close()
+	defer func() {
+		_ = httpListener.Close()
+	}()
 	httpsListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen HTTPS error: %v", err)
 	}
-	defer httpsListener.Close()
+	defer func() {
+		_ = httpsListener.Close()
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -634,7 +646,9 @@ func TestRunReturnsServeErrorFromClosedListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen HTTPS error: %v", err)
 	}
-	defer httpsListener.Close()
+	defer func() {
+		_ = httpsListener.Close()
+	}()
 
 	err = run(context.Background(), []string{
 		"--public-domain", "example.com",

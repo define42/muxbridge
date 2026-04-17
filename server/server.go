@@ -252,16 +252,24 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 	defer ws.close()
 
-	fmt.Fprintf(brw, "HTTP/1.1 101 Switching Protocols\r\n")
+	if _, err := io.WriteString(brw, "HTTP/1.1 101 Switching Protocols\r\n"); err != nil {
+		return
+	}
 	for k, vs := range headers.FromProto(responseStart.Headers) {
 		for _, v := range vs {
-			fmt.Fprintf(brw, "%s: %s\r\n", k, v)
+			if _, err := fmt.Fprintf(brw, "%s: %s\r\n", k, v); err != nil {
+				return
+			}
 		}
 	}
-	fmt.Fprintf(brw, "\r\n")
+	if _, err := io.WriteString(brw, "\r\n"); err != nil {
+		return
+	}
 	if err := brw.Flush(); err != nil {
 		return
 	}
@@ -414,7 +422,9 @@ func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string
 	}
 
 	if r.Body != nil {
-		defer r.Body.Close()
+		defer func() {
+			_ = r.Body.Close()
+		}()
 
 		buf := make([]byte, 32*1024)
 		for {

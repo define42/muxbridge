@@ -28,7 +28,9 @@ func TestConnectRejectsMissingRegisterFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialContext error: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
 	if err != nil {
@@ -59,7 +61,9 @@ func TestConnectRejectsUnknownToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialContext error: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
 	if err != nil {
@@ -90,7 +94,9 @@ func TestConnectRejectsMissingToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialContext error: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
 	if err != nil {
@@ -130,7 +136,9 @@ func TestConnectReplacesPreviousSessionForSameUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialContext error: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
 	if err != nil {
@@ -167,7 +175,9 @@ func TestConnectStreamsOutboundFrames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialContext error: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
 	if err != nil {

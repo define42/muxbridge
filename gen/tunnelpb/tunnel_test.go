@@ -369,7 +369,9 @@ func TestGRPCClientAndServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen error: %v", err)
 	}
-	defer listener.Close()
+	defer func() {
+		_ = listener.Close()
+	}()
 
 	server := grpc.NewServer()
 	RegisterTunnelServiceServer(server, protoTestService{})
@@ -385,7 +387,9 @@ func TestGRPCClientAndServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialContext error: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	client := NewTunnelServiceClient(conn)
 	stream, err := client.Connect(ctx)

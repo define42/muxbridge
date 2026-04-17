@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -71,8 +70,12 @@ func TestOneConnListenerAcceptAndClose(t *testing.T) {
 	t.Parallel()
 
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() {
+		_ = c1.Close()
+	}()
+	defer func() {
+		_ = c2.Close()
+	}()
 
 	listener := newOneConnListener(c1)
 	if listener.Addr().String() != c1.LocalAddr().String() {
@@ -106,8 +109,12 @@ func TestOneConnListenerCloseBeforeAccept(t *testing.T) {
 	t.Parallel()
 
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() {
+		_ = c1.Close()
+	}()
+	defer func() {
+		_ = c2.Close()
+	}()
 
 	listener := newOneConnListener(c1)
 	if err := listener.Close(); err != nil {
@@ -147,9 +154,14 @@ func wsUpgradeHandler(t *testing.T, sendPayload []byte, receivedCh chan<- []byte
 			t.Errorf("wsUpgradeHandler: Hijack error: %v", err)
 			return
 		}
-		defer conn.Close()
+		defer func() {
+			_ = conn.Close()
+		}()
 
-		fmt.Fprintf(brw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		if _, err := io.WriteString(brw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+			t.Errorf("wsUpgradeHandler: write handshake: %v", err)
+			return
+		}
 		if err := brw.Flush(); err != nil {
 			return
 		}

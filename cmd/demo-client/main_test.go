@@ -123,7 +123,7 @@ func TestRunReturnsConfigAndClientErrors(t *testing.T) {
 	}
 
 	err := run(context.Background(), []string{"--edge-addr", "127.0.0.1:1", "--token", ""}, func(string) string { return "" })
-	if err == nil || !strings.Contains(err.Error(), "Token is required") {
+	if err == nil || !strings.Contains(err.Error(), "token is required") {
 		t.Fatalf("run error = %v, want missing token", err)
 	}
 }

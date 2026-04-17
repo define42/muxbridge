@@ -91,13 +91,13 @@ func isWebSocketUpgrade(start *tunnelpb.RequestStart) bool {
 
 func New(cfg Config) (*Client, error) {
 	if cfg.EdgeAddr == "" {
-		return nil, errors.New("EdgeAddr is required")
+		return nil, errors.New("edge address is required")
 	}
 	if cfg.Handler == nil {
-		return nil, errors.New("Handler is required")
+		return nil, errors.New("handler is required")
 	}
 	if cfg.Token == "" {
-		return nil, errors.New("Token is required")
+		return nil, errors.New("token is required")
 	}
 	if cfg.ReconnectBackoff <= 0 {
 		cfg.ReconnectBackoff = 2 * time.Second
@@ -163,7 +163,9 @@ func (c *Client) runSession(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	c.setConn(conn)
 	defer c.clearConn(conn)
@@ -350,13 +352,15 @@ func (c *Client) handleWebSocket(
 	requestID := start.GetRequestId()
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() {
+		_ = clientConn.Close()
+	}()
 
 	listener := newOneConnListener(serverConn)
 	srv := &http.Server{Handler: c.handler}
 	go srv.Serve(listener) //nolint:errcheck
 	defer func() {
-		listener.Close()
+		_ = listener.Close()
 		_ = srv.Shutdown(context.Background())
 	}()
 
@@ -436,7 +440,7 @@ func (c *Client) handleWebSocket(
 		select {
 		case payload, ok := <-inbound:
 			if !ok {
-				clientConn.Close()
+				_ = clientConn.Close()
 				<-readDone
 				return
 			}
@@ -460,7 +464,9 @@ func (c *Client) serveRequest(
 ) {
 	defer done()
 	defer inflight.cancel()
-	defer inflight.bodyR.Close()
+	defer func() {
+		_ = inflight.bodyR.Close()
+	}()
 
 	w := newTunnelResponseWriter(requestID, send)
 	defer func() {
