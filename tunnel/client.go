@@ -194,8 +194,8 @@ func (c *Client) runSession(ctx context.Context) error {
 	// Bound the dial so that an unreachable edge does not trap the reconnect
 	// loop indefinitely — the parent context may still be long-lived.
 	dialCtx, dialCancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
+	defer dialCancel()
 	conn, err := grpc.DialContext(dialCtx, c.cfg.EdgeAddr, dialOpts...)
-	dialCancel()
 	if err != nil {
 		return err
 	}
@@ -404,8 +404,8 @@ func (c *Client) handleWebSocket(
 	defer func() {
 		_ = listener.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
-		cancel()
 	}()
 
 	req, err := http.NewRequest(start.GetMethod(), requestURL(start), http.NoBody)

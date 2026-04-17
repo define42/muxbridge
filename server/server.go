@@ -337,15 +337,19 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 		case data := <-ws.fromClient:
 			// Bound the time a slow browser can block this write so a stalled
 			// WebSocket does not hold up the hijacked connection indefinitely.
-			// If the deadline is exceeded the write fails and we close; that
-			// in turn closes ws.done and unblocks the session-level receiver,
-			// avoiding head-of-line blocking across other multiplexed
-			// requests on the same tunnel.
-			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+			// If the deadline cannot be set (e.g. the connection is already
+			// closed) or the write fails, we tear down; that closes ws.done
+			// and unblocks the session-level receiver, avoiding head-of-line
+			// blocking across other multiplexed requests on the same tunnel.
+			if err := conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout)); err != nil {
+				return
+			}
 			if _, err := conn.Write(data); err != nil {
 				return
 			}
-			_ = conn.SetWriteDeadline(time.Time{})
+			if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+				return
+			}
 		case <-ws.done:
 			return
 		case <-readDone:
