@@ -131,7 +131,7 @@ func TestServeHTTPStreamsResponseHeadersAndBody(t *testing.T) {
 	}
 }
 
-func TestServeHTTPReturnsOKWhenTunnelEndsWithoutStart(t *testing.T) {
+func TestServeHTTPReturnsBadGatewayWhenTunnelEndsWithoutStart(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t)
@@ -169,8 +169,8 @@ func TestServeHTTPReturnsOKWhenTunnelEndsWithoutStart(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeHTTP did not return")
 	}
-	if res.Code != http.StatusOK {
-		t.Fatalf("response code = %d, want %d", res.Code, http.StatusOK)
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
 	}
 }
 
@@ -207,7 +207,10 @@ func TestServeHTTPStopsWhenLateBodyErrorArrives(t *testing.T) {
 	state := waitForState(t, sess, requestStart.GetRequestId())
 	state.start <- &tunnelpb.ResponseStart{RequestId: requestStart.GetRequestId(), StatusCode: http.StatusOK}
 	state.body <- []byte("partial")
-	state.err <- errors.New("late error")
+	// Simulate a client-side ResponseError arriving after the body has
+	// already started streaming: fail() both delivers the error and closes
+	// done, which is how handleClientFrame signals an error in production.
+	state.fail(errors.New("late error"))
 
 	select {
 	case <-done:

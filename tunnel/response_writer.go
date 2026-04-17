@@ -16,6 +16,7 @@ type tunnelResponseWriter struct {
 	statusCode  int
 	requestID   string
 	send        func(*tunnelpb.ClientFrame) error
+	sendErr     error
 }
 
 func newTunnelResponseWriter(requestID string, send func(*tunnelpb.ClientFrame) error) *tunnelResponseWriter {
@@ -42,21 +43,37 @@ func (w *tunnelResponseWriter) WriteHeader(status int) {
 	h := headers.ToProto(w.header)
 	w.mu.Unlock()
 
-	_ = w.send(&tunnelpb.ClientFrame{
+	if err := w.send(&tunnelpb.ClientFrame{
 		Msg: &tunnelpb.ClientFrame_ResponseStart{ResponseStart: &tunnelpb.ResponseStart{
 			RequestId:  w.requestID,
 			StatusCode: int32(status),
 			Headers:    h,
 		}},
-	})
+	}); err != nil {
+		w.mu.Lock()
+		if w.sendErr == nil {
+			w.sendErr = err
+		}
+		w.mu.Unlock()
+	}
 }
 
 func (w *tunnelResponseWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	needHeader := !w.wroteHeader
+	prevErr := w.sendErr
 	w.mu.Unlock()
+	if prevErr != nil {
+		return 0, prevErr
+	}
 	if needHeader {
 		w.WriteHeader(http.StatusOK)
+		w.mu.Lock()
+		prevErr = w.sendErr
+		w.mu.Unlock()
+		if prevErr != nil {
+			return 0, prevErr
+		}
 	}
 
 	if err := w.send(&tunnelpb.ClientFrame{
@@ -65,6 +82,11 @@ func (w *tunnelResponseWriter) Write(p []byte) (int, error) {
 			Chunk:     append([]byte(nil), p...),
 		}},
 	}); err != nil {
+		w.mu.Lock()
+		if w.sendErr == nil {
+			w.sendErr = err
+		}
+		w.mu.Unlock()
 		return 0, err
 	}
 	return len(p), nil
