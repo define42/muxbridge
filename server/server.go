@@ -201,42 +201,67 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	select {
-	case start := <-state.start:
-		headers.Copy(w.Header(), headers.FromProto(start.Headers))
-		w.WriteHeader(int(start.StatusCode))
-	case err := <-state.err:
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	case <-state.done:
-		// The client finished without sending ResponseStart. If an error was
-		// reported, surface it; otherwise treat the empty response as a 502
-		// so the browser doesn't see a bogus 200.
-		if err := state.consumeErr(); err != nil {
+writeHeaders:
+	for {
+		select {
+		case start := <-state.start:
+			headers.Copy(w.Header(), headers.FromProto(start.Headers))
+			w.WriteHeader(int(start.StatusCode))
+			break writeHeaders
+		case err := <-state.err:
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
+		case <-state.done:
+			if start := state.consumeStart(); start != nil {
+				headers.Copy(w.Header(), headers.FromProto(start.Headers))
+				w.WriteHeader(int(start.StatusCode))
+				break writeHeaders
+			}
+			// The client finished without sending ResponseStart. If an error was
+			// reported, surface it; otherwise treat the empty response as a 502
+			// so the browser doesn't see a bogus 200.
+			if err := state.consumeErr(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			http.Error(w, "tunnel closed response before sending headers", http.StatusBadGateway)
+			return
+		case <-r.Context().Done():
+			s.cancelRequest(sess, requestID)
+			return
 		}
-		http.Error(w, "tunnel closed response before sending headers", http.StatusBadGateway)
-		return
-	case <-r.Context().Done():
-		s.cancelRequest(sess, requestID)
-		return
 	}
 
 	flusher, _ := w.(http.Flusher)
+	writeChunk := func(chunk []byte) bool {
+		if len(chunk) == 0 {
+			return true
+		}
+		if _, err := w.Write(chunk); err != nil {
+			s.cancelRequest(sess, requestID)
+			return false
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true
+	}
 	for {
 		select {
 		case chunk := <-state.body:
-			if len(chunk) > 0 {
-				if _, err := w.Write(chunk); err != nil {
-					s.cancelRequest(sess, requestID)
-					return
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
+			if !writeChunk(chunk) {
+				return
 			}
 		case <-state.done:
+			for {
+				chunk, ok := state.consumeBody()
+				if !ok {
+					break
+				}
+				if !writeChunk(chunk) {
+					return
+				}
+			}
 			if err := state.consumeErr(); err != nil {
 				// Headers have already been written; the body is truncated.
 				// Log so operators can diagnose and stop reading to signal
@@ -775,6 +800,24 @@ func (r *responseState) consumeErr() error {
 		return err
 	default:
 		return nil
+	}
+}
+
+func (r *responseState) consumeStart() *tunnelpb.ResponseStart {
+	select {
+	case start := <-r.start:
+		return start
+	default:
+		return nil
+	}
+}
+
+func (r *responseState) consumeBody() ([]byte, bool) {
+	select {
+	case chunk := <-r.body:
+		return chunk, true
+	default:
+		return nil, false
 	}
 }
 

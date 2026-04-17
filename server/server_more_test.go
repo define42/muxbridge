@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -131,6 +132,68 @@ func TestServeHTTPStreamsResponseHeadersAndBody(t *testing.T) {
 	}
 }
 
+func TestServeHTTPDrainsBufferedBodyAfterDone(t *testing.T) {
+	t.Parallel()
+
+	for i := 0; i < 20; i++ {
+		srv := newTestServer(t)
+		sess := &session{
+			publicHost: "demo.example.com",
+			username:   "demo",
+			outbound:   make(chan *tunnelpb.ServerFrame, 4),
+			done:       make(chan struct{}),
+			inflight:   make(map[string]*responseState),
+		}
+		srv.putSession(sess)
+
+		req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/drain", nil)
+		req.Host = "demo.example.com"
+		res := newBlockingRecorder()
+
+		done := make(chan struct{})
+		go func() {
+			srv.ServeHTTP(res, req)
+			close(done)
+		}()
+
+		startFrame := <-sess.outbound
+		requestStart := startFrame.GetRequestStart()
+		if requestStart == nil {
+			t.Fatalf("first frame = %T, want request start", startFrame.GetMsg())
+		}
+		<-sess.outbound
+
+		state := waitForState(t, sess, requestStart.GetRequestId())
+		state.start <- &tunnelpb.ResponseStart{
+			RequestId:  requestStart.GetRequestId(),
+			StatusCode: http.StatusOK,
+			Headers: []*tunnelpb.Header{
+				{Key: "Content-Type", Values: []string{"text/plain"}},
+			},
+		}
+
+		select {
+		case <-res.writeHeaderSeen:
+		case <-time.After(2 * time.Second):
+			t.Fatal("WriteHeader was not called")
+		}
+
+		state.body <- []byte("hello through grpc tunnel\n")
+		state.finish()
+		close(res.writeHeaderGate)
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("ServeHTTP did not return")
+		}
+
+		if got := res.Body.String(); got != "hello through grpc tunnel\n" {
+			t.Fatalf("iteration %d body = %q, want greeting", i, got)
+		}
+	}
+}
+
 func TestServeHTTPReturnsBadGatewayWhenTunnelEndsWithoutStart(t *testing.T) {
 	t.Parallel()
 
@@ -171,6 +234,28 @@ func TestServeHTTPReturnsBadGatewayWhenTunnelEndsWithoutStart(t *testing.T) {
 	}
 	if res.Code != http.StatusBadGateway {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+}
+
+func TestResponseStateConsumeBufferedStartAndBody(t *testing.T) {
+	t.Parallel()
+
+	state := newResponseState()
+	start := &tunnelpb.ResponseStart{RequestId: "req-1", StatusCode: http.StatusCreated}
+	state.start <- start
+	state.body <- []byte("payload")
+	state.finish()
+
+	if got := state.consumeStart(); got != start {
+		t.Fatalf("consumeStart = %#v, want %#v", got, start)
+	}
+
+	gotBody, ok := state.consumeBody()
+	if !ok {
+		t.Fatal("consumeBody reported no body, want payload")
+	}
+	if string(gotBody) != "payload" {
+		t.Fatalf("consumeBody = %q, want %q", string(gotBody), "payload")
 	}
 }
 
@@ -220,6 +305,29 @@ func TestServeHTTPStopsWhenLateBodyErrorArrives(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusOK)
 	}
+}
+
+type blockingRecorder struct {
+	*httptest.ResponseRecorder
+	writeHeaderSeen chan struct{}
+	writeHeaderGate chan struct{}
+	once            sync.Once
+}
+
+func newBlockingRecorder() *blockingRecorder {
+	return &blockingRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		writeHeaderSeen:  make(chan struct{}),
+		writeHeaderGate:  make(chan struct{}),
+	}
+}
+
+func (r *blockingRecorder) WriteHeader(code int) {
+	r.ResponseRecorder.WriteHeader(code)
+	r.once.Do(func() {
+		close(r.writeHeaderSeen)
+	})
+	<-r.writeHeaderGate
 }
 
 func TestServeHTTPReturnsBadGatewayWhenForwardRequestFails(t *testing.T) {
