@@ -271,3 +271,39 @@ if err := client.Run(ctx); err != nil {
 ```
 
 The client automatically reconnects on disconnect with a configurable backoff (default 2 s).
+
+### Hello World Example
+
+A complete Go program that serves a Hello World page through the tunnel:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+
+	"github.com/define42/muxbridge/tunnel"
+)
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Hello, World!")
+	})
+
+	client := tunnel.NewClient(tunnel.Config{
+		EdgeAddr: "edge.example.com:443",
+		Token:    "my-secret-token",
+		Handler:  mux,
+	})
+
+	if err := client.Run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+With the matching edge credential `my-secret-token=alice`, visiting `https://alice.example.com/` returns `Hello, World!`. No separate process or sidecar required — the tunnel is part of your binary.
