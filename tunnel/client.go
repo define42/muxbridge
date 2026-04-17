@@ -22,6 +22,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+var errSessionEnded = errors.New("tunnel session ended")
+
 type Config struct {
 	EdgeAddr         string
 	TunnelID         string
@@ -37,9 +39,10 @@ type Client struct {
 	handler http.Handler
 	logger  *log.Logger
 
-	mu     sync.Mutex
-	closed bool
-	conn   *grpc.ClientConn
+	mu      sync.Mutex
+	closed  bool
+	conn    *grpc.ClientConn
+	closeCh chan struct{}
 }
 
 type inflightRequest struct {
@@ -106,10 +109,18 @@ func New(cfg Config) (*Client, error) {
 		cfg:     cfg,
 		handler: cfg.Handler,
 		logger:  cfg.Logger,
+		closeCh: make(chan struct{}),
 	}, nil
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	c.mu.Lock()
+	if c.closeCh == nil {
+		c.closeCh = make(chan struct{})
+	}
+	closeCh := c.closeCh
+	c.mu.Unlock()
+
 	for {
 		err := c.runSession(ctx)
 		if ctx.Err() != nil {
@@ -127,6 +138,9 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
+		case <-closeCh:
+			timer.Stop()
+			return nil
 		case <-timer.C:
 		}
 	}
@@ -140,10 +154,16 @@ func (c *Client) logf(format string, args ...any) {
 
 func (c *Client) Close() error {
 	c.mu.Lock()
+	alreadyClosed := c.closed
 	c.closed = true
 	conn := c.conn
 	c.conn = nil
+	closeCh := c.closeCh
 	c.mu.Unlock()
+
+	if !alreadyClosed && closeCh != nil {
+		close(closeCh)
+	}
 
 	if conn != nil {
 		return conn.Close()
@@ -229,6 +249,12 @@ func (c *Client) runSession(ctx context.Context) error {
 	}
 	defer func() {
 		inflightMu.Lock()
+		for id, req := range inflight {
+			req.cancel()
+			_ = req.bodyW.CloseWithError(errSessionEnded)
+			_ = req.bodyR.CloseWithError(errSessionEnded)
+			delete(inflight, id)
+		}
 		for _, ch := range wsInbound {
 			close(ch)
 		}

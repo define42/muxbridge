@@ -25,29 +25,6 @@ jobs:
         with:
           fetch-depth: 0   # REQUIRED for tag calculation
 
-      - name: Install packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev   qemu-kvm  libvirt-daemon-system  libvirt-clients
-          sudo bash -c 'cat >>/etc/libvirt/qemu.conf <<EOF
-          user = "root"
-          group = "root"
-          dynamic_ownership = 0
-          security_driver = "none"
-          security_default_confined = 0
-          EOF'
-          sudo systemctl enable --now libvirtd
-          sudo systemctl start libvirtd
-          sudo chmod 777 /var/run/libvirt/libvirt-sock
-          sudo chmod 777 /var/lib/libvirt/images/
-          sudo virsh -c qemu:///system pool-info default || \
-            sudo virsh -c qemu:///system pool-define-as default dir --target /var/lib/libvirt/images
-          sudo virsh -c qemu:///system pool-start default
-          sudo virsh -c qemu:///system pool-autostart default
-          sudo systemctl restart libvirtd || true
-          sudo systemctl restart virtqemud || true
-          sudo systemctl restart virtstoraged || true
-
       # -------------------------------
       # Go setup
       # -------------------------------
@@ -65,12 +42,6 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          export LIBVIRT_VOLUME_MODE=0666
-          export LIBVIRT_VOLUME_OWNER=$(id -u libvirt-qemu 2>/dev/null || echo 0)
-          export LIBVIRT_VOLUME_GROUP=$(id -g libvirt-qemu 2>/dev/null || echo 0)
-          sudo mkdir /data/
-          sudo chmod 777 /data/
-          sudo chmod 777 /var/lib/libvirt/images/
           go test ./... -coverprofile=coverage.out -coverpkg=./...
 
       - name: Show coverage in job summary
