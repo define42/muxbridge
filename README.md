@@ -130,6 +130,7 @@ Both must be provided together.
 --client-credential token=username
 --tls-cert-file
 --tls-key-file
+--debug
 ```
 
 `--client-credential` may be repeated.
@@ -141,6 +142,7 @@ MUXBRIDGE_PUBLIC_DOMAIN
 MUXBRIDGE_CLIENT_CREDENTIALS
 MUXBRIDGE_TLS_CERT_FILE
 MUXBRIDGE_TLS_KEY_FILE
+MUXBRIDGE_DEBUG
 ```
 
 `MUXBRIDGE_CLIENT_CREDENTIALS` uses comma-separated `token=username` entries:
@@ -177,6 +179,15 @@ bin/edge \
 
 The demo client serves a small HTTP app locally and connects it to the edge.
 
+Routes served by the demo app:
+
+- `/` -> plain text greeting plus the browser's remote IP
+- `/slow` -> slow chunked plain-text response
+- `/ws-demo` -> browser page that exercises a WebSocket through the tunnel
+- `/ws-demo/socket` -> WebSocket endpoint used by `/ws-demo`
+- `/sse-demo` -> browser page that exercises Server-Sent Events through the tunnel
+- `/sse-demo/events` -> SSE endpoint used by `/sse-demo`
+
 Defaults:
 
 - TLS enabled
@@ -190,6 +201,7 @@ Defaults:
 --public-domain
 --edge-addr
 --token
+--debug
 ```
 
 ### Environment Variables
@@ -198,6 +210,7 @@ Defaults:
 MUXBRIDGE_PUBLIC_DOMAIN
 MUXBRIDGE_EDGE_ADDR
 MUXBRIDGE_CLIENT_TOKEN
+MUXBRIDGE_DEBUG
 ```
 
 ### Run The Demo Client
@@ -216,6 +229,29 @@ the demo client becomes available at:
 
 ```text
 https://demo.example.com/
+```
+
+Additional demo pages are available at:
+
+```text
+https://demo.example.com/ws-demo
+https://demo.example.com/sse-demo
+```
+
+### Debug Logging
+
+Both binaries support opt-in debug logging via `--debug` or `MUXBRIDGE_DEBUG=1`.
+
+Example:
+
+```bash
+MUXBRIDGE_DEBUG=1 bin/edge \
+  --public-domain example.com \
+  --client-credential demo-token=demo
+
+MUXBRIDGE_DEBUG=1 bin/demo-client \
+  --public-domain example.com \
+  --token demo-token
 ```
 
 ## Minimal End-To-End Example
