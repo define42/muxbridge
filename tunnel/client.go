@@ -29,6 +29,11 @@ var errSessionEnded = errors.New("tunnel session ended")
 // balances throughput against per-frame overhead.
 const ioBufSize = 32 * 1024
 
+// wsShutdownTimeout bounds how long the embedded http.Server spun up for a
+// WebSocket upgrade is given to drain during teardown. It is deliberately
+// short so a misbehaving handler cannot stall session cleanup.
+const wsShutdownTimeout = 5 * time.Second
+
 type Config struct {
 	EdgeAddr         string
 	TunnelID         string
@@ -403,7 +408,7 @@ func (c *Client) handleWebSocket(
 	go srv.Serve(listener) //nolint:errcheck
 	defer func() {
 		_ = listener.Close()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), wsShutdownTimeout)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
