@@ -405,7 +405,8 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 }
 
 func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string) error {
-	if err := s.sendFrame(sess, &tunnelpb.ServerFrame{
+	ctx := r.Context()
+	if err := s.sendFrameCtx(ctx, sess, &tunnelpb.ServerFrame{
 		Msg: &tunnelpb.ServerFrame_RequestStart{RequestStart: &tunnelpb.RequestStart{
 			RequestId:  requestID,
 			Method:     r.Method,
@@ -426,7 +427,6 @@ func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string
 			_ = r.Body.Close()
 		}()
 
-		ctx := r.Context()
 		buf := make([]byte, 32*1024)
 		for {
 			if err := ctx.Err(); err != nil {
@@ -435,7 +435,7 @@ func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string
 			n, err := r.Body.Read(buf)
 			if n > 0 {
 				chunk := append([]byte(nil), buf[:n]...)
-				if sendErr := s.sendFrame(sess, &tunnelpb.ServerFrame{
+				if sendErr := s.sendFrameCtx(ctx, sess, &tunnelpb.ServerFrame{
 					Msg: &tunnelpb.ServerFrame_RequestBody{RequestBody: &tunnelpb.RequestBody{
 						RequestId: requestID,
 						Chunk:     chunk,
@@ -454,7 +454,7 @@ func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string
 		}
 	}
 
-	return s.sendFrame(sess, &tunnelpb.ServerFrame{
+	return s.sendFrameCtx(ctx, sess, &tunnelpb.ServerFrame{
 		Msg: &tunnelpb.ServerFrame_RequestEnd{RequestEnd: &tunnelpb.RequestEnd{RequestId: requestID}},
 	})
 }
@@ -507,6 +507,20 @@ func (s *Server) sendFrame(sess *session, frame *tunnelpb.ServerFrame) error {
 	select {
 	case <-sess.done:
 		return errSessionClosed
+	case sess.outbound <- frame:
+		return nil
+	}
+}
+
+// sendFrameCtx enqueues a frame like sendFrame but also aborts when the
+// provided context is canceled. This prevents handlers from stalling on a
+// full outbound queue after their HTTP request has been aborted.
+func (s *Server) sendFrameCtx(ctx context.Context, sess *session, frame *tunnelpb.ServerFrame) error {
+	select {
+	case <-sess.done:
+		return errSessionClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	case sess.outbound <- frame:
 		return nil
 	}
