@@ -35,6 +35,11 @@ const wsWriteTimeout = 30 * time.Second
 type Config struct {
 	PublicDomain string
 	TokenUsers   map[string]string
+	// HeartbeatInterval controls how often the edge sends Ping frames on an
+	// otherwise idle tunnel session. The client answers with Pong, which keeps
+	// the stream active through load balancers and other idle-connection
+	// middleboxes. Defaults to 10 seconds when not set.
+	HeartbeatInterval time.Duration
 }
 
 type Server struct {
@@ -43,6 +48,7 @@ type Server struct {
 	publicDomain string
 	tokenUsers   map[string]string
 	publicHosts  map[string]struct{}
+	heartbeat    time.Duration
 
 	mu            sync.RWMutex
 	sessions      map[string]*session
@@ -84,6 +90,9 @@ func New(cfg Config) (*Server, error) {
 	if err := hostnames.ValidateDomain(publicDomain); err != nil {
 		return nil, fmt.Errorf("invalid public domain: %w", err)
 	}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = 10 * time.Second
+	}
 
 	tokenUsers := make(map[string]string, len(cfg.TokenUsers))
 	publicHosts := make(map[string]struct{}, len(cfg.TokenUsers))
@@ -114,6 +123,7 @@ func New(cfg Config) (*Server, error) {
 		publicDomain: publicDomain,
 		tokenUsers:   tokenUsers,
 		publicHosts:  publicHosts,
+		heartbeat:    cfg.HeartbeatInterval,
 		sessions:     make(map[string]*session),
 	}, nil
 }
@@ -407,6 +417,32 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 				if err := stream.Send(frame); err != nil {
 					sendErr <- err
 					return
+				}
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(s.heartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stream.Context().Done():
+				return
+			case <-sess.done:
+				return
+			case <-ticker.C:
+				// Heartbeats are best-effort. If the outbound queue is already
+				// busy with real traffic, skip this tick; active traffic keeps
+				// the session fresh anyway.
+				select {
+				case <-stream.Context().Done():
+					return
+				case <-sess.done:
+					return
+				case sess.outbound <- &tunnelpb.ServerFrame{
+					Msg: &tunnelpb.ServerFrame_Ping{Ping: &tunnelpb.Ping{UnixNano: time.Now().UnixNano()}},
+				}:
+				default:
 				}
 			}
 		}

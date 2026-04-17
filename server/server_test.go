@@ -209,6 +209,52 @@ func TestConnectStreamsOutboundFrames(t *testing.T) {
 	}
 }
 
+func TestConnectSendsHeartbeatOnIdleSession(t *testing.T) {
+	t.Parallel()
+
+	srv, err := New(Config{
+		PublicDomain:      "example.com",
+		HeartbeatInterval: 20 * time.Millisecond,
+		TokenUsers: map[string]string{
+			"demo-token": "demo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	addr, cleanup := startServerGRPC(t, srv)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("DialContext error: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	if err := stream.Send(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "demo-token"}},
+	}); err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+
+	frame, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv error: %v", err)
+	}
+	if ping := frame.GetPing(); ping == nil || ping.GetUnixNano() == 0 {
+		t.Fatalf("frame = %#v, want heartbeat ping", frame.GetMsg())
+	}
+}
+
 func TestServeHTTPRoutesNormalizedKnownHost(t *testing.T) {
 	t.Parallel()
 
