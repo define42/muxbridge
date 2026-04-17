@@ -35,6 +35,7 @@ message RequestStart {
   string raw_query = 6;
   repeated Header headers = 7;
   string remote_addr = 8;
+  string raw_path = 9;
 }
 
 message RequestBody {

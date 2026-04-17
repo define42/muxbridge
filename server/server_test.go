@@ -2,29 +2,107 @@ package server
 
 import (
 	"context"
-	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/define42/muxbridge/gen/tunnelpb"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
+
+func TestConnectRejectsMissingRegisterFrame(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	addr, cleanup := startServerGRPC(t, srv)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("DialContext error: %v", err)
+	}
+	defer conn.Close()
+
+	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	if err := stream.Send(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Pong{Pong: &tunnelpb.Pong{UnixNano: 1}},
+	}); err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+
+	_, err = stream.Recv()
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Connect error code = %v, want %v (err=%v)", status.Code(err), codes.InvalidArgument, err)
+	}
+}
 
 func TestConnectRejectsUnknownToken(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t)
-	stream := newFakeConnectStream(
-		&tunnelpb.ClientFrame{
-			Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "bad-token"}},
-		},
-	)
+	addr, cleanup := startServerGRPC(t, srv)
+	defer cleanup()
 
-	err := srv.Connect(stream)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("DialContext error: %v", err)
+	}
+	defer conn.Close()
+
+	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	if err := stream.Send(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "bad-token"}},
+	}); err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+
+	_, err = stream.Recv()
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("Connect error code = %v, want %v (err=%v)", status.Code(err), codes.Unauthenticated, err)
+	}
+}
+
+func TestConnectRejectsMissingToken(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	addr, cleanup := startServerGRPC(t, srv)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("DialContext error: %v", err)
+	}
+	defer conn.Close()
+
+	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	if err := stream.Send(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{}},
+	}); err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+
+	_, err = stream.Recv()
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("Connect error code = %v, want %v (err=%v)", status.Code(err), codes.Unauthenticated, err)
 	}
@@ -43,16 +121,26 @@ func TestConnectReplacesPreviousSessionForSameUser(t *testing.T) {
 	}
 	srv.putSession(oldSession)
 
-	stream := newFakeConnectStream(
-		&tunnelpb.ClientFrame{
-			Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "demo-token"}},
-		},
-	)
+	addr, cleanup := startServerGRPC(t, srv)
+	defer cleanup()
 
-	done := make(chan error, 1)
-	go func() {
-		done <- srv.Connect(stream)
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("DialContext error: %v", err)
+	}
+	defer conn.Close()
+
+	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	if err := stream.Send(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "demo-token"}},
+	}); err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
 
 	waitFor(t, func() bool {
 		current := srv.getSession("demo.example.com")
@@ -64,10 +152,50 @@ func TestConnectReplacesPreviousSessionForSameUser(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("old session was not shut down")
 	}
+}
 
-	stream.closeWith(io.EOF)
-	if err := <-done; err != nil {
-		t.Fatalf("Connect returned error: %v", err)
+func TestConnectStreamsOutboundFrames(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	addr, cleanup := startServerGRPC(t, srv)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("DialContext error: %v", err)
+	}
+	defer conn.Close()
+
+	stream, err := tunnelpb.NewTunnelServiceClient(conn).Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	if err := stream.Send(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "demo-token"}},
+	}); err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+
+	var sess *session
+	waitFor(t, func() bool {
+		sess = srv.getSession("demo.example.com")
+		return sess != nil
+	})
+	if err := srv.sendFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_Ping{Ping: &tunnelpb.Ping{UnixNano: 99}},
+	}); err != nil {
+		t.Fatalf("sendFrame error: %v", err)
+	}
+
+	frame, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv error: %v", err)
+	}
+	if ping := frame.GetPing(); ping == nil || ping.GetUnixNano() != 99 {
+		t.Fatalf("ping = %#v, want unix_nano 99", ping)
 	}
 }
 
@@ -152,6 +280,26 @@ func newTestServer(t *testing.T) *Server {
 	return srv
 }
 
+func startServerGRPC(t *testing.T, srv *Server) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen error: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	tunnelpb.RegisterTunnelServiceServer(grpcServer, srv)
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+
+	return listener.Addr().String(), func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	}
+}
+
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()
 
@@ -174,73 +322,4 @@ func waitForState(t *testing.T, sess *session, requestID string) *responseState 
 		return state != nil
 	})
 	return state
-}
-
-type fakeConnectStream struct {
-	ctx      context.Context
-	recv     chan *tunnelpb.ClientFrame
-	recvErr  chan error
-	sent     []*tunnelpb.ServerFrame
-	trailer  metadata.MD
-	header   metadata.MD
-	sentHead metadata.MD
-}
-
-func newFakeConnectStream(frames ...*tunnelpb.ClientFrame) *fakeConnectStream {
-	stream := &fakeConnectStream{
-		ctx:     context.Background(),
-		recv:    make(chan *tunnelpb.ClientFrame, len(frames)),
-		recvErr: make(chan error, 1),
-	}
-	for _, frame := range frames {
-		stream.recv <- frame
-	}
-	return stream
-}
-
-func (s *fakeConnectStream) closeWith(err error) {
-	s.recvErr <- err
-}
-
-func (s *fakeConnectStream) SetHeader(md metadata.MD) error {
-	s.header = md
-	return nil
-}
-
-func (s *fakeConnectStream) SendHeader(md metadata.MD) error {
-	s.sentHead = md
-	return nil
-}
-
-func (s *fakeConnectStream) SetTrailer(md metadata.MD) {
-	s.trailer = md
-}
-
-func (s *fakeConnectStream) Context() context.Context {
-	return s.ctx
-}
-
-func (s *fakeConnectStream) SendMsg(any) error {
-	return nil
-}
-
-func (s *fakeConnectStream) RecvMsg(any) error {
-	return nil
-}
-
-func (s *fakeConnectStream) Send(frame *tunnelpb.ServerFrame) error {
-	s.sent = append(s.sent, frame)
-	return nil
-}
-
-func (s *fakeConnectStream) Recv() (*tunnelpb.ClientFrame, error) {
-	select {
-	case frame := <-s.recv:
-		if frame != nil {
-			return frame, nil
-		}
-	case err := <-s.recvErr:
-		return nil, err
-	}
-	return nil, io.EOF
 }

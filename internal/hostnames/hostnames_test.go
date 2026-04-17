@@ -11,6 +11,9 @@ func TestNormalizeHostAndDomain(t *testing.T) {
 	if got := NormalizeDomain(" Demo.Example.COM. "); got != "demo.example.com" {
 		t.Fatalf("NormalizeDomain = %q, want %q", got, "demo.example.com")
 	}
+	if got := NormalizeLabel(" Demo-User "); got != "demo-user" {
+		t.Fatalf("NormalizeLabel = %q, want %q", got, "demo-user")
+	}
 	if got := Subdomain("Demo", "Example.COM."); got != "demo.example.com" {
 		t.Fatalf("Subdomain = %q, want %q", got, "demo.example.com")
 	}

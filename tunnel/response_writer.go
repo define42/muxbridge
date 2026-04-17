@@ -70,7 +70,7 @@ func (w *tunnelResponseWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (w *tunnelResponseWriter) Flush() {}
+func (w *tunnelResponseWriter) Flush() { _ = w.header }
 
 func (w *tunnelResponseWriter) Finish() error {
 	w.mu.Lock()

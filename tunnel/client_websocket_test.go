@@ -75,6 +75,9 @@ func TestOneConnListenerAcceptAndClose(t *testing.T) {
 	defer c2.Close()
 
 	listener := newOneConnListener(c1)
+	if listener.Addr().String() != c1.LocalAddr().String() {
+		t.Fatalf("Addr = %q, want %q", listener.Addr(), c1.LocalAddr())
+	}
 
 	// First Accept returns the connection without error.
 	conn, err := listener.Accept()
@@ -360,6 +363,134 @@ func TestRunSessionHandlesWebSocketRejection(t *testing.T) {
 
 	if err := client.runSession(ctx); err != nil {
 		t.Fatalf("runSession error: %v", err)
+	}
+}
+
+func TestHandleWebSocketReportsInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	var frames []*tunnelpb.ClientFrame
+	client := &Client{handler: http.NewServeMux()}
+	client.handleWebSocket(
+		context.Background(),
+		&tunnelpb.RequestStart{
+			RequestId: "ws-bad",
+			Method:    "BAD METHOD",
+			Scheme:    "https",
+			Host:      "demo.example.com",
+			Path:      "/ws",
+		},
+		make(chan []byte),
+		func(frame *tunnelpb.ClientFrame) error {
+			frames = append(frames, frame)
+			return nil
+		},
+		func() {},
+	)
+	if len(frames) != 1 {
+		t.Fatalf("frames len = %d, want 1", len(frames))
+	}
+	if respErr := frames[0].GetResponseError(); respErr == nil || respErr.GetRequestId() != "ws-bad" {
+		t.Fatalf("frame = %#v, want response error", frames[0].GetMsg())
+	}
+}
+
+func TestHandleWebSocketReturnsWhenInboundCloses(t *testing.T) {
+	t.Parallel()
+
+	done := make(chan struct{})
+	frames := make(chan *tunnelpb.ClientFrame, 4)
+	client := &Client{handler: wsUpgradeHandler(t, nil, nil)}
+	inbound := make(chan []byte)
+	go func() {
+		defer close(done)
+		client.handleWebSocket(
+			context.Background(),
+			&tunnelpb.RequestStart{
+				RequestId: "ws-close",
+				Method:    http.MethodGet,
+				Scheme:    "https",
+				Host:      "demo.example.com",
+				Path:      "/ws",
+				Headers: []*tunnelpb.Header{
+					{Key: "Upgrade", Values: []string{"websocket"}},
+					{Key: "Connection", Values: []string{"Upgrade"}},
+				},
+			},
+			inbound,
+			func(frame *tunnelpb.ClientFrame) error {
+				frames <- frame
+				return nil
+			},
+			func() {},
+		)
+	}()
+
+	select {
+	case frame := <-frames:
+		if rs := frame.GetResponseStart(); rs == nil || rs.GetStatusCode() != http.StatusSwitchingProtocols {
+			t.Fatalf("frame = %#v, want 101 response start", frame.GetMsg())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive response start")
+	}
+
+	close(inbound)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleWebSocket did not return")
+	}
+}
+
+func TestHandleWebSocketReturnsWhenContextCancels(t *testing.T) {
+	t.Parallel()
+
+	done := make(chan struct{})
+	frames := make(chan *tunnelpb.ClientFrame, 4)
+	client := &Client{handler: wsUpgradeHandler(t, nil, nil)}
+	inbound := make(chan []byte)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer close(done)
+		client.handleWebSocket(
+			ctx,
+			&tunnelpb.RequestStart{
+				RequestId: "ws-cancel",
+				Method:    http.MethodGet,
+				Scheme:    "https",
+				Host:      "demo.example.com",
+				Path:      "/ws",
+				Headers: []*tunnelpb.Header{
+					{Key: "Upgrade", Values: []string{"websocket"}},
+					{Key: "Connection", Values: []string{"Upgrade"}},
+				},
+			},
+			inbound,
+			func(frame *tunnelpb.ClientFrame) error {
+				frames <- frame
+				return nil
+			},
+			func() {},
+		)
+	}()
+
+	select {
+	case frame := <-frames:
+		if rs := frame.GetResponseStart(); rs == nil || rs.GetStatusCode() != http.StatusSwitchingProtocols {
+			t.Fatalf("frame = %#v, want 101 response start", frame.GetMsg())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive response start")
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleWebSocket did not return after cancel")
 	}
 }
 

@@ -20,10 +20,22 @@ import (
 	"google.golang.org/grpc"
 )
 
+type edgeTLSAssets struct {
+	tlsConfig   *tls.Config
+	httpHandler http.Handler
+	manage      func(context.Context) error
+}
+
 func main() {
-	cfg, err := loadConfig(nil, getenv)
-	if err != nil {
+	if err := run(context.Background(), nil, getenv, nil, nil); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context, args []string, getenv func(string) string, httpListener, httpsListener net.Listener) error {
+	cfg, err := loadConfig(args, getenv)
+	if err != nil {
+		return err
 	}
 
 	srv, err := server.New(server.Config{
@@ -31,66 +43,101 @@ func main() {
 		TokenUsers:   cfg.ClientCredentials,
 	})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	grpcServer := grpc.NewServer()
 	tunnelpb.RegisterTunnelServiceServer(grpcServer, srv)
 
 	httpsHandler := newHTTPSHandler(cfg.EdgeDomain, srv.HasPublicHost, srv, grpcServer)
-
-	httpListener, err := net.Listen("tcp", ":80")
+	tlsAssets, err := edgeTLSAssetsFor(cfg)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	httpsListener, err := net.Listen("tcp", ":443")
-	if err != nil {
-		log.Fatal(err)
+
+	if httpListener == nil {
+		httpListener, err = net.Listen("tcp", ":80")
+		if err != nil {
+			return err
+		}
+	}
+	if httpsListener == nil {
+		httpsListener, err = net.Listen("tcp", ":443")
+		if err != nil {
+			_ = httpListener.Close()
+			return err
+		}
 	}
 
 	httpServer := &http.Server{
-		Handler:           http.HandlerFunc(redirectToHTTPS),
+		Handler:           tlsAssets.httpHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
-	go serveOrDie("HTTP", httpServer.Serve, httpListener)
-
 	httpsServer := &http.Server{
 		Handler:           httpsHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       5 * time.Minute,
+		TLSConfig:         tlsAssets.tlsConfig,
 	}
-	tlsConfig, httpHandler, err := edgeTLSConfig(context.Background(), cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-	httpServer.Handler = httpHandler
-	httpsServer.TLSConfig = tlsConfig
 	if err := http2.ConfigureServer(httpsServer, &http2.Server{}); err != nil {
-		log.Fatal(err)
+		_ = httpListener.Close()
+		_ = httpsListener.Close()
+		return err
 	}
 
+	serveErr := make(chan error, 2)
+	go serve("HTTP", httpServer.Serve, httpListener, serveErr)
+	if err := tlsAssets.manage(ctx); err != nil {
+		_ = httpsListener.Close()
+		_ = shutdownServers(httpServer, nil)
+		return err
+	}
+	go serve("HTTPS", httpsServer.Serve, tls.NewListener(httpsListener, tlsAssets.tlsConfig), serveErr)
+
 	log.Printf("edge listening on https://%s and http://:80", cfg.EdgeDomain)
-	log.Fatal(httpsServer.Serve(tls.NewListener(httpsListener, tlsConfig)))
+	select {
+	case err := <-serveErr:
+		_ = shutdownServers(httpServer, httpsServer)
+		return err
+	case <-ctx.Done():
+		_ = shutdownServers(httpServer, httpsServer)
+		return ctx.Err()
+	}
 }
 
 func edgeTLSConfig(ctx context.Context, cfg edgeConfig) (*tls.Config, http.Handler, error) {
+	assets, err := edgeTLSAssetsFor(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := assets.manage(ctx); err != nil {
+		return nil, nil, err
+	}
+	return assets.tlsConfig, assets.httpHandler, nil
+}
+
+func edgeTLSAssetsFor(cfg edgeConfig) (edgeTLSAssets, error) {
 	if cfg.TLSCertFile != "" {
 		tlsCert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
-			return nil, nil, fmt.Errorf("load static TLS certificate: %w", err)
+			return edgeTLSAssets{}, fmt.Errorf("load static TLS certificate: %w", err)
 		}
 
 		log.Printf("using static TLS certificate from %s and %s", cfg.TLSCertFile, cfg.TLSKeyFile)
-		return &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-			MinVersion:   tls.VersionTLS12,
-			NextProtos:   []string{"h2", "http/1.1"},
-		}, http.HandlerFunc(redirectToHTTPS), nil
+		return edgeTLSAssets{
+			tlsConfig: &tls.Config{
+				Certificates: []tls.Certificate{tlsCert},
+				MinVersion:   tls.VersionTLS12,
+				NextProtos:   []string{"h2", "http/1.1"},
+			},
+			httpHandler: http.HandlerFunc(redirectToHTTPS),
+			manage:      func(context.Context) error { return nil },
+		}, nil
 	}
 
 	certmagic.DefaultACME.Agreed = true
@@ -98,14 +145,16 @@ func edgeTLSConfig(ctx context.Context, cfg edgeConfig) (*tls.Config, http.Handl
 
 	certConfig := certmagic.NewDefault()
 	managedHosts := cfg.managedHosts()
-	log.Printf("managing TLS certificates for %s", strings.Join(managedHosts, ", "))
-	if err := certConfig.ManageSync(ctx, managedHosts); err != nil {
-		return nil, nil, err
-	}
-
 	tlsConfig := certConfig.TLSConfig()
 	tlsConfig.NextProtos = appendMissing(tlsConfig.NextProtos, "h2", "http/1.1")
-	return tlsConfig, wrapHTTPChallenge(certConfig, http.HandlerFunc(redirectToHTTPS)), nil
+	return edgeTLSAssets{
+		tlsConfig:   tlsConfig,
+		httpHandler: wrapHTTPChallenge(certConfig, http.HandlerFunc(redirectToHTTPS)),
+		manage: func(ctx context.Context) error {
+			log.Printf("managing TLS certificates for %s", strings.Join(managedHosts, ", "))
+			return certConfig.ManageSync(ctx, managedHosts)
+		},
+	}, nil
 }
 
 func newHTTPSHandler(edgeDomain string, isPublicHost func(string) bool, publicHandler http.Handler, grpcHandler http.Handler) http.Handler {
@@ -141,10 +190,37 @@ func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveOrDie(name string, serve func(net.Listener) error, listener net.Listener) {
-	log.Printf("%s listening on %s", name, listener.Addr())
-	if err := serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := serveOnce(name, serve, listener); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func serve(name string, serve func(net.Listener) error, listener net.Listener, errCh chan<- error) {
+	errCh <- serveOnce(name, serve, listener)
+}
+
+func serveOnce(name string, serve func(net.Listener) error, listener net.Listener) error {
+	log.Printf("%s listening on %s", name, listener.Addr())
+	if err := serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func shutdownServers(servers ...*http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var firstErr error
+	for _, server := range servers {
+		if server == nil {
+			continue
+		}
+		if err := server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func appendMissing(existing []string, values ...string) []string {

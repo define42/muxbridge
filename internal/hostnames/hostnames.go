@@ -19,6 +19,10 @@ func NormalizeDomain(domain string) string {
 	return NormalizeHost(domain)
 }
 
+func NormalizeLabel(label string) string {
+	return strings.TrimSpace(strings.ToLower(label))
+}
+
 func Subdomain(label, domain string) string {
 	return NormalizeHost(label + "." + domain)
 }

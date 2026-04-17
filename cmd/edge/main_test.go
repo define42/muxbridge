@@ -150,6 +150,18 @@ func TestLoadConfigRejectsInvalidUsername(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsUsernameWithPort(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo:443",
+	}, func(string) string { return "" })
+	if err == nil {
+		t.Fatal("expected invalid username with port error")
+	}
+}
+
 func TestLoadConfigFlagOverridesEnvStaticTLSFiles(t *testing.T) {
 	t.Parallel()
 
@@ -298,6 +310,44 @@ func TestEdgeTLSConfigStaticCertificate(t *testing.T) {
 	}
 }
 
+func TestEdgeTLSAssetsForManagedTLS(t *testing.T) {
+	t.Parallel()
+
+	assets, err := edgeTLSAssetsFor(edgeConfig{
+		PublicDomain: "example.com",
+		EdgeDomain:   "edge.example.com",
+		ClientCredentials: map[string]string{
+			"demo-token": "demo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("edgeTLSAssetsFor error: %v", err)
+	}
+	if assets.tlsConfig == nil {
+		t.Fatal("expected tlsConfig")
+	}
+	if assets.httpHandler == nil {
+		t.Fatal("expected httpHandler")
+	}
+	if assets.manage == nil {
+		t.Fatal("expected manage callback")
+	}
+	if !containsString(assets.tlsConfig.NextProtos, "h2") || !containsString(assets.tlsConfig.NextProtos, "http/1.1") {
+		t.Fatalf("NextProtos = %#v, want h2 and http/1.1", assets.tlsConfig.NextProtos)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://edge.example.com/path?x=1", nil)
+	req.Host = "edge.example.com"
+	res := httptest.NewRecorder()
+	assets.httpHandler.ServeHTTP(res, req)
+	if res.Code != http.StatusMovedPermanently {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusMovedPermanently)
+	}
+	if got := res.Header().Get("Location"); got != "https://edge.example.com/path?x=1" {
+		t.Fatalf("Location = %q, want %q", got, "https://edge.example.com/path?x=1")
+	}
+}
+
 func TestEdgeTLSConfigStaticCertificateServesHTTPS(t *testing.T) {
 	t.Parallel()
 
@@ -440,6 +490,23 @@ func TestServeOrDieAllowsServerClosed(t *testing.T) {
 	}, listener)
 }
 
+func TestServeOnceReturnsUnexpectedError(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen error: %v", err)
+	}
+	defer listener.Close()
+
+	got := serveOnce("test", func(net.Listener) error {
+		return errors.New("boom")
+	}, listener)
+	if got == nil || got.Error() != "boom" {
+		t.Fatalf("serveOnce error = %v, want boom", got)
+	}
+}
+
 func TestAppendMissingAndGetenv(t *testing.T) {
 	if got := appendMissing([]string{"h2"}, "h2", "http/1.1"); len(got) != 2 || got[0] != "h2" || got[1] != "http/1.1" {
 		t.Fatalf("appendMissing = %#v, want [h2 http/1.1]", got)
@@ -449,6 +516,134 @@ func TestAppendMissingAndGetenv(t *testing.T) {
 	t.Setenv(key, "  value  ")
 	if got := getenv(key); got != "value" {
 		t.Fatalf("getenv = %q, want %q", got, "value")
+	}
+}
+
+func TestRunServesStaticTLSAndRedirects(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	certFile := filepath.Join(tempDir, "cert.pem")
+	keyFile := filepath.Join(tempDir, "key.pem")
+	certPEM, keyPEM := mustGenerateTestCertificate(t, "edge.example.com")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen HTTP error: %v", err)
+	}
+	defer httpListener.Close()
+	httpsListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen HTTPS error: %v", err)
+	}
+	defer httpsListener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, []string{
+			"--public-domain", "example.com",
+			"--client-credential", "demo-token=demo",
+			"--tls-cert-file", certFile,
+			"--tls-key-file", keyFile,
+		}, func(string) string { return "" }, httpListener, httpsListener)
+	}()
+
+	waitForHTTPStatus(t, func() (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodGet, "http://"+httpListener.Addr().String()+"/hello", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Host = "edge.example.com"
+		client := &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		return client.Do(req)
+	}, http.StatusMovedPermanently)
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to add certificate to root pool")
+	}
+
+	waitForHTTPStatus(t, func() (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodGet, "https://"+httpsListener.Addr().String()+"/", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Host = "edge.example.com"
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					RootCAs:    roots,
+					ServerName: "edge.example.com",
+				},
+			},
+		}
+		return client.Do(req)
+	}, http.StatusNotFound)
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("run error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestEdgeTLSConfigManagedContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := edgeTLSConfig(ctx, edgeConfig{
+		PublicDomain: "example.com",
+		EdgeDomain:   "edge.example.com",
+		ClientCredentials: map[string]string{
+			"demo-token": "demo",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected managed TLS setup error")
+	}
+}
+
+func TestRunReturnsServeErrorFromClosedListener(t *testing.T) {
+	tempDir := t.TempDir()
+	certFile := filepath.Join(tempDir, "cert.pem")
+	keyFile := filepath.Join(tempDir, "key.pem")
+	certPEM, keyPEM := mustGenerateTestCertificate(t, "edge.example.com")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen HTTP error: %v", err)
+	}
+	_ = httpListener.Close()
+	httpsListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen HTTPS error: %v", err)
+	}
+	defer httpsListener.Close()
+
+	err = run(context.Background(), []string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+		"--tls-cert-file", certFile,
+		"--tls-key-file", keyFile,
+	}, func(string) string { return "" }, httpListener, httpsListener)
+	if err == nil {
+		t.Fatal("expected serve error from closed listener")
 	}
 }
 
@@ -500,4 +695,30 @@ func mustGenerateTestCertificate(t *testing.T, dnsNames ...string) ([]byte, []by
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
 	return certPEM, keyPEM
+}
+
+func waitForHTTPStatus(t *testing.T, do func() (*http.Response, error), want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := do()
+		if err == nil {
+			_ = res.Body.Close()
+			if res.StatusCode == want {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("did not observe HTTP status %d before timeout", want)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

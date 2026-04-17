@@ -131,6 +131,120 @@ func TestServeHTTPStreamsResponseHeadersAndBody(t *testing.T) {
 	}
 }
 
+func TestServeHTTPReturnsOKWhenTunnelEndsWithoutStart(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 4),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	srv.putSession(sess)
+
+	req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/nostart", nil)
+	req.Host = "demo.example.com"
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(res, req)
+		close(done)
+	}()
+
+	startFrame := <-sess.outbound
+	requestStart := startFrame.GetRequestStart()
+	if requestStart == nil {
+		t.Fatalf("first frame = %T, want request start", startFrame.GetMsg())
+	}
+	<-sess.outbound
+
+	state := waitForState(t, sess, requestStart.GetRequestId())
+	state.finish()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not return")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestServeHTTPStopsWhenLateBodyErrorArrives(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 4),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	srv.putSession(sess)
+
+	req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/stream", nil)
+	req.Host = "demo.example.com"
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(res, req)
+		close(done)
+	}()
+
+	startFrame := <-sess.outbound
+	requestStart := startFrame.GetRequestStart()
+	if requestStart == nil {
+		t.Fatalf("first frame = %T, want request start", startFrame.GetMsg())
+	}
+	<-sess.outbound
+
+	state := waitForState(t, sess, requestStart.GetRequestId())
+	state.start <- &tunnelpb.ResponseStart{RequestId: requestStart.GetRequestId(), StatusCode: http.StatusOK}
+	state.body <- []byte("partial")
+	state.err <- errors.New("late error")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not return")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestServeHTTPReturnsBadGatewayWhenForwardRequestFails(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 4),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	srv.putSession(sess)
+
+	bodyR, bodyW := io.Pipe()
+	_ = bodyW.CloseWithError(errors.New("body boom"))
+	req := httptest.NewRequest(http.MethodPost, "https://demo.example.com/upload", bodyR)
+	req.Host = "demo.example.com"
+	res := httptest.NewRecorder()
+
+	srv.ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+}
+
 func TestServeHTTPReturnsResponseError(t *testing.T) {
 	t.Parallel()
 
@@ -233,7 +347,7 @@ func TestForwardRequestIncludesBodyAndHTTPSMetadata(t *testing.T) {
 		inflight:   make(map[string]*responseState),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "http://demo.example.com/upload?x=1", io.NopCloser(strings.NewReader("payload")))
+	req := httptest.NewRequest(http.MethodPost, "http://demo.example.com/upload/a%2Fb?x=1", io.NopCloser(strings.NewReader("payload")))
 	req.Host = "demo.example.com:443"
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.TLS = &tls.ConnectionState{}
@@ -247,7 +361,7 @@ func TestForwardRequestIncludesBodyAndHTTPSMetadata(t *testing.T) {
 	if start == nil {
 		t.Fatal("expected request start frame")
 	}
-	if start.GetRequestId() != "42" || start.GetScheme() != "https" || start.GetHost() != "demo.example.com:443" || start.GetPath() != "/upload" || start.GetRawQuery() != "x=1" || start.GetRemoteAddr() != "127.0.0.1:1234" {
+	if start.GetRequestId() != "42" || start.GetScheme() != "https" || start.GetHost() != "demo.example.com:443" || start.GetPath() != "/upload/a/b" || start.GetRawPath() != "/upload/a%2Fb" || start.GetRawQuery() != "x=1" || start.GetRemoteAddr() != "127.0.0.1:1234" {
 		t.Fatalf("unexpected request start: %#v", start)
 	}
 	if len(start.GetHeaders()) != 1 || start.GetHeaders()[0].GetKey() != "X-Test" {
@@ -398,12 +512,170 @@ func TestSchemeOf(t *testing.T) {
 
 	forwardedReq := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	forwardedReq.Header.Set("X-Forwarded-Proto", "https")
-	if got := schemeOf(forwardedReq); got != "https" {
-		t.Fatalf("schemeOf forwarded request = %q, want %q", got, "https")
+	if got := schemeOf(forwardedReq); got != "http" {
+		t.Fatalf("schemeOf spoofed forwarded request = %q, want %q", got, "http")
 	}
 
 	plainReq := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	if got := schemeOf(plainReq); got != "http" {
 		t.Fatalf("schemeOf plain request = %q, want %q", got, "http")
+	}
+}
+
+func TestForwardRequestReturnsSessionClosed(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 1),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	sess.shutdown(errors.New("closed"))
+
+	req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/", nil)
+	req.Host = "demo.example.com"
+
+	if err := srv.forwardRequest(req, sess, "42"); !errors.Is(err, errSessionClosed) {
+		t.Fatalf("forwardRequest error = %v, want %v", err, errSessionClosed)
+	}
+}
+
+func TestServeWebSocketRequiresHijacker(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := newWSSession()
+	srv.putSession(sess)
+
+	req := newWSRequest("demo.example.com")
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.serveWebSocket(res, req, sess)
+	}()
+
+	startFrame := <-sess.outbound
+	requestID := startFrame.GetRequestStart().GetRequestId()
+	<-sess.outbound
+
+	state := waitForState(t, sess, requestID)
+	state.start <- &tunnelpb.ResponseStart{
+		RequestId:  requestID,
+		StatusCode: http.StatusSwitchingProtocols,
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveWebSocket did not return")
+	}
+	if res.Code != http.StatusHTTPVersionNotSupported {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusHTTPVersionNotSupported)
+	}
+}
+
+func TestServeWebSocketReturnsBadGatewayWhenSessionCloses(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := newWSSession()
+	srv.putSession(sess)
+
+	req := newWSRequest("demo.example.com")
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.serveWebSocket(res, req, sess)
+	}()
+
+	startFrame := <-sess.outbound
+	requestID := startFrame.GetRequestStart().GetRequestId()
+	<-sess.outbound
+
+	if state := waitForState(t, sess, requestID); state == nil {
+		t.Fatal("missing response state")
+	}
+	sess.shutdown(errors.New("closed"))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveWebSocket did not return")
+	}
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+}
+
+func TestServeWebSocketReturnsBadGatewayOnResponseError(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := newWSSession()
+	srv.putSession(sess)
+
+	req := newWSRequest("demo.example.com")
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.serveWebSocket(res, req, sess)
+	}()
+
+	startFrame := <-sess.outbound
+	requestID := startFrame.GetRequestStart().GetRequestId()
+	<-sess.outbound
+
+	state := waitForState(t, sess, requestID)
+	state.err <- errors.New("boom")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveWebSocket did not return")
+	}
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+}
+
+func TestServeWebSocketReturnsBadGatewayWhenTunnelEndsBeforeUpgrade(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	sess := newWSSession()
+	srv.putSession(sess)
+
+	req := newWSRequest("demo.example.com")
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.serveWebSocket(res, req, sess)
+	}()
+
+	startFrame := <-sess.outbound
+	requestID := startFrame.GetRequestStart().GetRequestId()
+	<-sess.outbound
+
+	state := waitForState(t, sess, requestID)
+	state.finish()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveWebSocket did not return")
+	}
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
 	}
 }

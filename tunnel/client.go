@@ -483,6 +483,7 @@ func requestURL(start *tunnelpb.RequestStart) string {
 		Scheme:   start.GetScheme(),
 		Host:     start.GetHost(),
 		Path:     path,
+		RawPath:  start.GetRawPath(),
 		RawQuery: start.GetRawQuery(),
 	}
 	return u.String()

@@ -4,32 +4,89 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/define42/muxbridge/internal/hostnames"
 	"github.com/define42/muxbridge/tunnel"
 )
 
-func main() {
-	publicDomain := flag.String("public-domain", os.Getenv("MUXBRIDGE_PUBLIC_DOMAIN"), "Public base domain for the edge")
-	edgeAddr := flag.String("edge-addr", os.Getenv("MUXBRIDGE_EDGE_ADDR"), "Edge gRPC address")
-	token := flag.String("token", defaultString(os.Getenv("MUXBRIDGE_CLIENT_TOKEN"), "demo-token"), "Client authentication token")
-	flag.Parse()
+type demoConfig struct {
+	PublicDomain string
+	EdgeAddr     string
+	Token        string
+}
 
-	if *edgeAddr == "" {
-		domain := hostnames.NormalizeDomain(*publicDomain)
-		if domain == "" {
-			log.Fatal("public domain is required when edge addr is not provided")
-		}
-		if err := hostnames.ValidateDomain(domain); err != nil {
-			log.Fatalf("invalid public domain: %v", err)
-		}
-		*edgeAddr = hostnames.Subdomain("edge", domain) + ":443"
+var slowChunkDelay = 500 * time.Millisecond
+
+func main() {
+	if err := run(context.Background(), os.Args[1:], getenv); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context, args []string, getenv func(string) string) error {
+	cfg, err := loadConfig(args, getenv)
+	if err != nil {
+		return err
 	}
 
+	mux := newDemoMux()
+
+	cli, err := tunnel.New(tunnel.Config{
+		EdgeAddr: cfg.EdgeAddr,
+		Token:    cfg.Token,
+		Handler:  mux,
+		Logger:   log.Default(),
+	})
+	if err != nil {
+		return err
+	}
+
+	return cli.Run(ctx)
+}
+
+func loadConfig(args []string, getenv func(string) string) (demoConfig, error) {
+	fs := flag.NewFlagSet("demo-client", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	cfg := demoConfig{
+		PublicDomain: getenv("MUXBRIDGE_PUBLIC_DOMAIN"),
+		EdgeAddr:     getenv("MUXBRIDGE_EDGE_ADDR"),
+		Token:        defaultString(getenv("MUXBRIDGE_CLIENT_TOKEN"), "demo-token"),
+	}
+
+	fs.StringVar(&cfg.PublicDomain, "public-domain", cfg.PublicDomain, "Public base domain for the edge")
+	fs.StringVar(&cfg.EdgeAddr, "edge-addr", cfg.EdgeAddr, "Edge gRPC address")
+	fs.StringVar(&cfg.Token, "token", cfg.Token, "Client authentication token")
+	if err := fs.Parse(args); err != nil {
+		return demoConfig{}, err
+	}
+
+	cfg.PublicDomain = strings.TrimSpace(cfg.PublicDomain)
+	cfg.EdgeAddr = strings.TrimSpace(cfg.EdgeAddr)
+	cfg.Token = strings.TrimSpace(cfg.Token)
+
+	if cfg.EdgeAddr == "" {
+		domain := hostnames.NormalizeDomain(cfg.PublicDomain)
+		if domain == "" {
+			return demoConfig{}, fmt.Errorf("public domain is required when edge addr is not provided")
+		}
+		if err := hostnames.ValidateDomain(domain); err != nil {
+			return demoConfig{}, fmt.Errorf("invalid public domain: %w", err)
+		}
+		cfg.PublicDomain = domain
+		cfg.EdgeAddr = hostnames.Subdomain("edge", domain) + ":443"
+	}
+
+	return cfg, nil
+}
+
+func newDemoMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -42,21 +99,10 @@ func main() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(slowChunkDelay)
 		}
 	})
-
-	cli, err := tunnel.New(tunnel.Config{
-		EdgeAddr: *edgeAddr,
-		Token:    *token,
-		Handler:  mux,
-		Logger:   log.Default(),
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Fatal(cli.Run(context.Background()))
+	return mux
 }
 
 func defaultString(value, fallback string) string {
@@ -64,4 +110,8 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func getenv(key string) string {
+	return strings.TrimSpace(os.Getenv(key))
 }

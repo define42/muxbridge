@@ -86,7 +86,7 @@ func New(cfg Config) (*Server, error) {
 			return nil, errors.New("token must not be empty")
 		}
 
-		username = hostnames.NormalizeHost(username)
+		username = hostnames.NormalizeLabel(username)
 		if err := hostnames.ValidateLabel(username); err != nil {
 			return nil, fmt.Errorf("invalid username %q: %w", username, err)
 		}
@@ -404,6 +404,7 @@ func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string
 			Scheme:     schemeOf(r),
 			Host:       r.Host,
 			Path:       r.URL.Path,
+			RawPath:    r.URL.RawPath,
 			RawQuery:   r.URL.RawQuery,
 			Headers:    headers.ToProto(r.Header),
 			RemoteAddr: r.RemoteAddr,
@@ -506,9 +507,6 @@ func (s *Server) cancelRequest(sess *session, requestID string) {
 func schemeOf(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
-	}
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		return proto
 	}
 	return "http"
 }

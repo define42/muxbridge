@@ -74,7 +74,7 @@ type UnimplementedTunnelServiceServer struct {
 func (UnimplementedTunnelServiceServer) Connect(TunnelService_ConnectServer) error {
 	return status.Errorf(codes.Unimplemented, "method Connect not implemented")
 }
-func (UnimplementedTunnelServiceServer) mustEmbedUnimplementedTunnelServiceServer() {}
+func (UnimplementedTunnelServiceServer) mustEmbedUnimplementedTunnelServiceServer() { _ = struct{}{} }
 
 // UnsafeTunnelServiceServer may be embedded to opt out of forward compatibility for this service.
 // Use of this interface is not recommended, as added methods to TunnelServiceServer will

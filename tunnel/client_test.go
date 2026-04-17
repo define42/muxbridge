@@ -345,10 +345,181 @@ func TestRequestURL(t *testing.T) {
 	if got := requestURL(&tunnelpb.RequestStart{
 		Scheme:   "https",
 		Host:     "demo.example.com",
-		Path:     "",
+		Path:     "/files/a/b",
+		RawPath:  "/files/a%2Fb",
 		RawQuery: "x=1",
-	}); got != "https://demo.example.com/?x=1" {
-		t.Fatalf("requestURL = %q, want %q", got, "https://demo.example.com/?x=1")
+	}); got != "https://demo.example.com/files/a%2Fb?x=1" {
+		t.Fatalf("requestURL = %q, want %q", got, "https://demo.example.com/files/a%2Fb?x=1")
+	}
+	if got := requestURL(&tunnelpb.RequestStart{
+		Scheme: "https",
+		Host:   "demo.example.com",
+	}); got != "https://demo.example.com/" {
+		t.Fatalf("requestURL empty path = %q, want %q", got, "https://demo.example.com/")
+	}
+}
+
+func TestRunReconnectsAfterSessionError(t *testing.T) {
+	t.Parallel()
+
+	attempts := make(chan struct{}, 4)
+	addr, cleanup := startTunnelGRPCServer(t, func(stream tunnelpb.TunnelService_ConnectServer) error {
+		frame, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		if frame.GetRegister() == nil {
+			t.Fatalf("expected Register, got %T", frame.GetMsg())
+		}
+		attempts <- struct{}{}
+		if len(attempts) == 1 {
+			return errors.New("boom")
+		}
+		<-stream.Context().Done()
+		return nil
+	})
+	defer cleanup()
+
+	client, err := New(Config{
+		EdgeAddr:         "passthrough:///" + addr,
+		Handler:          http.NewServeMux(),
+		Token:            "demo-token",
+		Insecure:         true,
+		ReconnectBackoff: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	err = client.Run(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if len(attempts) < 2 {
+		t.Fatalf("attempts = %d, want at least 2", len(attempts))
+	}
+}
+
+func TestRunReturnsNilAfterClose(t *testing.T) {
+	t.Parallel()
+
+	registered := make(chan struct{}, 1)
+	addr, cleanup := startTunnelGRPCServer(t, func(stream tunnelpb.TunnelService_ConnectServer) error {
+		frame, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		if frame.GetRegister() == nil {
+			t.Fatalf("expected Register, got %T", frame.GetMsg())
+		}
+		registered <- struct{}{}
+		return nil
+	})
+	defer cleanup()
+
+	client, err := New(Config{
+		EdgeAddr: "passthrough:///" + addr,
+		Handler:  http.NewServeMux(),
+		Token:    "demo-token",
+		Insecure: true,
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Run(context.Background())
+	}()
+
+	select {
+	case <-registered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not register before timeout")
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after Close")
+	}
+}
+
+func TestRunStopsBeforeReconnectTimerFires(t *testing.T) {
+	t.Parallel()
+
+	firstAttempt := make(chan struct{}, 1)
+	addr, cleanup := startTunnelGRPCServer(t, func(stream tunnelpb.TunnelService_ConnectServer) error {
+		frame, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		if frame.GetRegister() == nil {
+			t.Fatalf("expected Register, got %T", frame.GetMsg())
+		}
+		firstAttempt <- struct{}{}
+		return errors.New("boom")
+	})
+	defer cleanup()
+
+	client, err := New(Config{
+		EdgeAddr:         "passthrough:///" + addr,
+		Handler:          http.NewServeMux(),
+		Token:            "demo-token",
+		Insecure:         true,
+		ReconnectBackoff: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Run(ctx)
+	}()
+
+	select {
+	case <-firstAttempt:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not make the first attempt")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestRunSessionRespectsCanceledSecureContext(t *testing.T) {
+	t.Parallel()
+
+	client, err := New(Config{
+		EdgeAddr: "127.0.0.1:1",
+		Handler:  http.NewServeMux(),
+		Token:    "demo-token",
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.runSession(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runSession error = %v, want %v", err, context.Canceled)
 	}
 }
 

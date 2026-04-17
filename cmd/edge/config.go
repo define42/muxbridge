@@ -151,7 +151,7 @@ func parseCredential(entry string) (string, string, error) {
 	}
 
 	token = strings.TrimSpace(token)
-	username = hostnames.NormalizeHost(username)
+	username = hostnames.NormalizeLabel(username)
 
 	if token == "" {
 		return "", "", fmt.Errorf("malformed credential %q: token must not be empty", entry)
