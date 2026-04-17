@@ -14,6 +14,7 @@ import (
 
 	"github.com/define42/muxbridge/internal/hostnames"
 	"github.com/define42/muxbridge/tunnel"
+	"golang.org/x/net/websocket"
 )
 
 type demoConfig struct {
@@ -108,6 +109,31 @@ func newDemoMux() *http.ServeMux {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = fmt.Fprintf(w, "hello through grpc tunnel\nremote ip: %s\n", remoteIPFromAddr(r.RemoteAddr))
 	})
+	mux.HandleFunc("/ws-demo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, websocketDemoPage)
+	})
+	mux.Handle("/ws-demo/socket", websocket.Handler(func(conn *websocket.Conn) {
+		defer func() {
+			_ = conn.Close()
+		}()
+
+		remoteIP := remoteIPFromAddr(conn.Request().RemoteAddr)
+		if err := websocket.Message.Send(conn, "connected from "+remoteIP); err != nil {
+			return
+		}
+
+		for {
+			var message string
+			if err := websocket.Message.Receive(conn, &message); err != nil {
+				return
+			}
+			reply := fmt.Sprintf("echo from %s: %s", remoteIP, strings.TrimSpace(message))
+			if err := websocket.Message.Send(conn, reply); err != nil {
+				return
+			}
+		}
+	}))
 	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		for i := 0; i < 5; i++ {
@@ -152,3 +178,126 @@ func remoteIPFromAddr(remoteAddr string) string {
 func getenv(key string) string {
 	return strings.TrimSpace(os.Getenv(key))
 }
+
+const websocketDemoPage = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MuxBridge WebSocket Demo</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #111827;
+      color: #f3f4f6;
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+    }
+    p {
+      margin: 0 0 16px;
+      color: #d1d5db;
+    }
+    form {
+      display: flex;
+      gap: 8px;
+      margin: 16px 0;
+    }
+    input, button {
+      font: inherit;
+      border-radius: 6px;
+      border: 1px solid #4b5563;
+      padding: 10px 12px;
+    }
+    input {
+      flex: 1;
+      background: #030712;
+      color: inherit;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      cursor: pointer;
+    }
+    pre {
+      min-height: 220px;
+      padding: 12px;
+      border-radius: 6px;
+      background: #030712;
+      border: 1px solid #374151;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    .status {
+      color: #93c5fd;
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>WebSocket Demo</h1>
+    <p>Open a live socket to the demo client, send a message, and watch the echo come back through the tunnel.</p>
+    <div class="status" id="status">connecting...</div>
+    <form id="chat-form">
+      <input id="message" name="message" autocomplete="off" value="hello websocket" aria-label="Message">
+      <button type="submit">Send</button>
+    </form>
+    <pre id="log"></pre>
+  </main>
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const formEl = document.getElementById('chat-form');
+    const inputEl = document.getElementById('message');
+    const socketUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws-demo/socket';
+    const socket = new WebSocket(socketUrl);
+
+    function appendLog(line) {
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    socket.addEventListener('open', () => {
+      statusEl.textContent = 'connected: ' + socketUrl;
+      appendLog('socket open');
+    });
+
+    socket.addEventListener('message', (event) => {
+      appendLog('server: ' + event.data);
+    });
+
+    socket.addEventListener('close', () => {
+      statusEl.textContent = 'socket closed';
+      appendLog('socket closed');
+    });
+
+    socket.addEventListener('error', () => {
+      statusEl.textContent = 'socket error';
+      appendLog('socket error');
+    });
+
+    formEl.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = inputEl.value.trim();
+      if (!value) {
+        return;
+      }
+      appendLog('client: ' + value);
+      socket.send(value);
+      inputEl.select();
+    });
+  </script>
+</body>
+</html>
+`

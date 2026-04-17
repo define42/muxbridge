@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/websocket"
 )
 
 func TestDefaultString(t *testing.T) {
@@ -104,6 +106,16 @@ func TestNewDemoMuxHandlers(t *testing.T) {
 		t.Fatalf("/ body = %q, want greeting plus remote ip", rootRes.Body.String())
 	}
 
+	wsPageReq := httptest.NewRequest(http.MethodGet, "http://demo.example.com/ws-demo", nil)
+	wsPageRes := httptest.NewRecorder()
+	mux.ServeHTTP(wsPageRes, wsPageReq)
+	if wsPageRes.Code != http.StatusOK {
+		t.Fatalf("/ws-demo status = %d, want %d", wsPageRes.Code, http.StatusOK)
+	}
+	if got := wsPageRes.Body.String(); !strings.Contains(got, "WebSocket Demo") || !strings.Contains(got, "/ws-demo/socket") {
+		t.Fatalf("/ws-demo body = %q, want websocket demo page", got)
+	}
+
 	previousDelay := slowChunkDelay
 	slowChunkDelay = 0
 	t.Cleanup(func() { slowChunkDelay = previousDelay })
@@ -116,6 +128,42 @@ func TestNewDemoMuxHandlers(t *testing.T) {
 	}
 	if got := slowRes.Body.String(); got != "chunk 1\nchunk 2\nchunk 3\nchunk 4\nchunk 5\n" {
 		t.Fatalf("/slow body = %q, want five chunks", got)
+	}
+}
+
+func TestWebSocketDemoEcho(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(newDemoMux())
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws-demo/socket"
+	ws, err := websocket.Dial(wsURL, "", server.URL)
+	if err != nil {
+		t.Fatalf("websocket.Dial error: %v", err)
+	}
+	defer func() {
+		_ = ws.Close()
+	}()
+
+	var welcome string
+	if err := websocket.Message.Receive(ws, &welcome); err != nil {
+		t.Fatalf("Receive welcome error: %v", err)
+	}
+	if !strings.Contains(welcome, "connected from ") {
+		t.Fatalf("welcome = %q, want connection banner", welcome)
+	}
+
+	if err := websocket.Message.Send(ws, "ping demo"); err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+
+	var reply string
+	if err := websocket.Message.Receive(ws, &reply); err != nil {
+		t.Fatalf("Receive reply error: %v", err)
+	}
+	if !strings.Contains(reply, "echo from ") || !strings.Contains(reply, "ping demo") {
+		t.Fatalf("reply = %q, want echoed message", reply)
 	}
 }
 
