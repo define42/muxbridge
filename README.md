@@ -1,5 +1,6 @@
 # muxbridge
 [![codecov](https://codecov.io/gh/define42/muxbridge/graph/badge.svg?token=V3CLO9YG7H)](https://codecov.io/gh/define42/muxbridge)
+
 MuxBridge exposes an HTTP server running behind a client over a gRPC tunnel.
 
 The edge server accepts authenticated client connections on `edge.<public-domain>` and publishes each connected client at `<username>.<public-domain>`.
@@ -24,6 +25,17 @@ go build -o bin/edge ./cmd/edge
 go build -o bin/demo-client ./cmd/demo-client
 ```
 
+## Test
+
+```bash
+go test ./...
+go test -race ./...
+go test ./... -coverprofile=/tmp/muxbridge.cover.out
+go tool cover -func=/tmp/muxbridge.cover.out
+```
+
+The current suite uses real listeners and gRPC streams and keeps total statement coverage above 90%.
+
 ## How Routing Works
 
 - The edge control endpoint is always `edge.<public-domain>`.
@@ -33,6 +45,9 @@ go build -o bin/demo-client ./cmd/demo-client
 - Example: `demo-token=demo` publishes the client at `demo.example.com`.
 - Username `edge` is reserved and cannot be used.
 - Usernames must be a single lowercase DNS label containing `a-z`, `0-9`, and interior `-`.
+- Request forwarding preserves method, headers, body, query string, and the escaped request path via `raw_path`.
+- The forwarded request scheme comes from the edge connection itself: HTTPS requests arrive as `https`, plain HTTP requests arrive as `http`, and client-supplied `X-Forwarded-Proto` is ignored.
+- WebSocket upgrade requests are proxied as upgraded byte streams after the HTTP handshake.
 
 `Register.tunnel_id` is still present in the wire format for compatibility, but routing no longer depends on it.
 
@@ -59,7 +74,7 @@ By default, the edge server uses CertMagic and manages certificates for:
 - `edge.<public-domain>`
 - every configured `<username>.<public-domain>`
 
-This requires DNS for each managed hostname to point at the edge server and ports `80` and `443` to be reachable.
+Managed certificates use ACME HTTP-01 challenges on port `80`. DNS for each managed hostname must point at the edge server, and both ports `80` and `443` must be reachable. TLS-ALPN challenges are disabled.
 
 ### Static Certificate Support
 
@@ -103,7 +118,7 @@ MUXBRIDGE_TLS_KEY_FILE
 demo-token=demo,admin-token=admin
 ```
 
-Flag credential entries are appended after environment entries. Startup fails on malformed entries, duplicate tokens, duplicate usernames, invalid usernames, or reserved username `edge`.
+Flag credential entries are appended after environment entries. Credential values are trimmed, usernames are normalized to lowercase before validation, and startup fails on malformed entries, duplicate tokens, duplicate usernames, invalid usernames, usernames with ports such as `demo:443`, or reserved username `edge`.
 
 ## Running The Edge
 
@@ -134,6 +149,7 @@ Defaults:
 - TLS enabled
 - token: `demo-token`
 - edge address: `edge.<public-domain>:443` when `--edge-addr` is not provided
+- flag and environment string values are trimmed before use
 
 ### Flags
 
