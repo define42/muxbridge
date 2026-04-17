@@ -25,6 +25,7 @@ type demoConfig struct {
 }
 
 var slowChunkDelay = 500 * time.Millisecond
+var sseTickInterval = time.Second
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], getenv); err != nil {
@@ -113,6 +114,40 @@ func newDemoMux() *http.ServeMux {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, websocketDemoPage)
 	})
+	mux.HandleFunc("/sse-demo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, sseDemoPage)
+	})
+	mux.HandleFunc("/sse-demo/events", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		remoteIP := remoteIPFromAddr(r.RemoteAddr)
+		writeSSEEvent(w, "connected", "remote ip: "+remoteIP)
+		flusher.Flush()
+
+		ticker := time.NewTicker(sseTickInterval)
+		defer ticker.Stop()
+
+		tick := 0
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case ts := <-ticker.C:
+				tick++
+				writeSSEEvent(w, "tick", fmt.Sprintf("tick %d at %s from %s", tick, ts.UTC().Format(time.RFC3339), remoteIP))
+				flusher.Flush()
+			}
+		}
+	})
 	mux.Handle("/ws-demo/socket", websocket.Handler(func(conn *websocket.Conn) {
 		defer func() {
 			_ = conn.Close()
@@ -173,6 +208,16 @@ func remoteIPFromAddr(remoteAddr string) string {
 		return host
 	}
 	return remoteAddr
+}
+
+func writeSSEEvent(w io.Writer, eventName, data string) {
+	if eventName != "" {
+		_, _ = fmt.Fprintf(w, "event: %s\n", eventName)
+	}
+	for _, line := range strings.Split(data, "\n") {
+		_, _ = fmt.Fprintf(w, "data: %s\n", line)
+	}
+	_, _ = io.WriteString(w, "\n")
 }
 
 func getenv(key string) string {
@@ -296,6 +341,91 @@ const websocketDemoPage = `<!doctype html>
       appendLog('client: ' + value);
       socket.send(value);
       inputEl.select();
+    });
+  </script>
+</body>
+</html>
+`
+
+const sseDemoPage = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MuxBridge SSE Demo</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #111827;
+      color: #f3f4f6;
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+    }
+    p {
+      margin: 0 0 16px;
+      color: #d1d5db;
+    }
+    .status {
+      color: #93c5fd;
+      font-size: 0.95rem;
+      margin-bottom: 12px;
+    }
+    pre {
+      min-height: 220px;
+      padding: 12px;
+      border-radius: 6px;
+      background: #030712;
+      border: 1px solid #374151;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SSE Demo</h1>
+    <p>Watch a server-sent event stream come through the tunnel without polling.</p>
+    <div class="status" id="status">connecting...</div>
+    <pre id="log"></pre>
+  </main>
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const streamUrl = '/sse-demo/events';
+    const source = new EventSource(streamUrl);
+
+    function appendLog(line) {
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    source.addEventListener('open', () => {
+      statusEl.textContent = 'connected: ' + streamUrl;
+      appendLog('stream open');
+    });
+
+    source.addEventListener('connected', (event) => {
+      appendLog('server: ' + event.data);
+    });
+
+    source.addEventListener('tick', (event) => {
+      appendLog('tick: ' + event.data);
+    });
+
+    source.addEventListener('error', () => {
+      statusEl.textContent = 'stream reconnecting...';
+      appendLog('stream error');
     });
   </script>
 </body>
