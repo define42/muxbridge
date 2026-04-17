@@ -105,3 +105,182 @@ func TestTunnelResponseWriterWritePropagatesSendError(t *testing.T) {
 		t.Fatalf("sendCalls = %d, want 2", sendCalls)
 	}
 }
+
+// TestTunnelResponseWriterWriteHeaderSendErrorBlocksWrite ensures that when
+// WriteHeader's send fails, the recorded error short-circuits the following
+// Write without producing a second send call.
+func TestTunnelResponseWriterWriteHeaderSendErrorBlocksWrite(t *testing.T) {
+	t.Parallel()
+
+	sendErr := errors.New("start send failed")
+	sendCalls := 0
+	w := newTunnelResponseWriter("req-4", func(frame *tunnelpb.ClientFrame) error {
+		sendCalls++
+		if frame.GetResponseStart() != nil {
+			return sendErr
+		}
+		return nil
+	})
+
+	w.WriteHeader(http.StatusTeapot)
+	if sendCalls != 1 {
+		t.Fatalf("sendCalls after WriteHeader = %d, want 1", sendCalls)
+	}
+
+	n, err := w.Write([]byte("body"))
+	if !errors.Is(err, sendErr) {
+		t.Fatalf("Write err = %v, want %v", err, sendErr)
+	}
+	if n != 0 {
+		t.Fatalf("Write n = %d, want 0", n)
+	}
+	// No additional send should be attempted once WriteHeader has failed.
+	if sendCalls != 1 {
+		t.Fatalf("sendCalls after Write = %d, want 1", sendCalls)
+	}
+}
+
+// TestTunnelResponseWriterWriteSkippedWhenHeaderSendFailedLazily covers the
+// path where Write triggers an implicit WriteHeader that fails: the error
+// returned by WriteHeader must be surfaced to the caller without attempting
+// to send the body frame.
+func TestTunnelResponseWriterWriteSkippedWhenHeaderSendFailedLazily(t *testing.T) {
+	t.Parallel()
+
+	sendErr := errors.New("header send failed")
+	var bodyAttempts int
+	w := newTunnelResponseWriter("req-4b", func(frame *tunnelpb.ClientFrame) error {
+		if frame.GetResponseStart() != nil {
+			return sendErr
+		}
+		if frame.GetResponseBody() != nil {
+			bodyAttempts++
+		}
+		return nil
+	})
+
+	n, err := w.Write([]byte("body"))
+	if !errors.Is(err, sendErr) {
+		t.Fatalf("Write err = %v, want %v", err, sendErr)
+	}
+	if n != 0 {
+		t.Fatalf("Write n = %d, want 0", n)
+	}
+	if bodyAttempts != 0 {
+		t.Fatalf("body send attempts = %d, want 0", bodyAttempts)
+	}
+}
+
+// TestTunnelResponseWriterFinishPropagatesSendError ensures an error from
+// sending the ResponseEnd frame is returned to the caller.
+func TestTunnelResponseWriterFinishPropagatesSendError(t *testing.T) {
+	t.Parallel()
+
+	sendErr := errors.New("end send failed")
+	w := newTunnelResponseWriter("req-5", func(frame *tunnelpb.ClientFrame) error {
+		if frame.GetResponseEnd() != nil {
+			return sendErr
+		}
+		return nil
+	})
+
+	if err := w.Finish(); !errors.Is(err, sendErr) {
+		t.Fatalf("Finish err = %v, want %v", err, sendErr)
+	}
+}
+
+// TestTunnelResponseWriterFailNilIsNoop verifies Fail(nil) returns nil
+// without sending any frame.
+func TestTunnelResponseWriterFailNilIsNoop(t *testing.T) {
+	t.Parallel()
+
+	var frames []*tunnelpb.ClientFrame
+	w := newTunnelResponseWriter("req-6", func(frame *tunnelpb.ClientFrame) error {
+		frames = append(frames, frame)
+		return nil
+	})
+
+	if err := w.Fail(nil); err != nil {
+		t.Fatalf("Fail(nil) = %v, want nil", err)
+	}
+	if len(frames) != 0 {
+		t.Fatalf("frames after Fail(nil) = %d, want 0", len(frames))
+	}
+
+	// The writer is not marked ended, so normal flow still works.
+	if _, err := w.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write after Fail(nil) error: %v", err)
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatalf("Finish after Fail(nil) error: %v", err)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("frames after full flow = %d, want 3", len(frames))
+	}
+}
+
+// TestTunnelResponseWriterFailAfterFinishIsNoop ensures calling Fail after
+// the writer is already ended returns nil and does not emit more frames.
+func TestTunnelResponseWriterFailAfterFinishIsNoop(t *testing.T) {
+	t.Parallel()
+
+	var frames []*tunnelpb.ClientFrame
+	w := newTunnelResponseWriter("req-7", func(frame *tunnelpb.ClientFrame) error {
+		frames = append(frames, frame)
+		return nil
+	})
+
+	w.WriteHeader(http.StatusOK)
+	if err := w.Finish(); err != nil {
+		t.Fatalf("Finish error: %v", err)
+	}
+	before := len(frames)
+	if err := w.Fail(errors.New("late")); err != nil {
+		t.Fatalf("Fail after Finish = %v, want nil", err)
+	}
+	if len(frames) != before {
+		t.Fatalf("frames grew after Fail post-Finish: %d -> %d", before, len(frames))
+	}
+}
+
+// TestTunnelResponseWriterFailPropagatesSendError verifies that if sending
+// the ResponseError frame fails, the error is returned to the caller.
+func TestTunnelResponseWriterFailPropagatesSendError(t *testing.T) {
+	t.Parallel()
+
+	sendErr := errors.New("error frame send failed")
+	w := newTunnelResponseWriter("req-8", func(frame *tunnelpb.ClientFrame) error {
+		if frame.GetResponseError() != nil {
+			return sendErr
+		}
+		return nil
+	})
+
+	if err := w.Fail(errors.New("boom")); !errors.Is(err, sendErr) {
+		t.Fatalf("Fail err = %v, want %v", err, sendErr)
+	}
+}
+
+// TestTunnelResponseWriterFlushAfterFinishIsNoop guards the defensive
+// `!w.ended` check in Flush: once Finish has completed, Flush must not
+// attempt to emit another ResponseStart frame.
+func TestTunnelResponseWriterFlushAfterFinishIsNoop(t *testing.T) {
+	t.Parallel()
+
+	var frames []*tunnelpb.ClientFrame
+	w := newTunnelResponseWriter("req-9", func(frame *tunnelpb.ClientFrame) error {
+		frames = append(frames, frame)
+		return nil
+	})
+
+	// Finish before any explicit WriteHeader: the writer lazily sends
+	// ResponseStart and then ResponseEnd.
+	if err := w.Finish(); err != nil {
+		t.Fatalf("Finish error: %v", err)
+	}
+	before := len(frames)
+	w.Flush()
+	if len(frames) != before {
+		t.Fatalf("frames grew after post-Finish Flush: %d -> %d", before, len(frames))
+	}
+}
