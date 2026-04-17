@@ -18,6 +18,7 @@ import (
 	"github.com/define42/muxbridge/internal/headers"
 	"github.com/define42/muxbridge/internal/hostnames"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -40,6 +41,8 @@ type Config struct {
 	// the stream active through load balancers and other idle-connection
 	// middleboxes. Defaults to 10 seconds when not set.
 	HeartbeatInterval time.Duration
+	Logger            *log.Logger
+	Debug             bool
 }
 
 type Server struct {
@@ -49,13 +52,17 @@ type Server struct {
 	tokenUsers   map[string]string
 	publicHosts  map[string]struct{}
 	heartbeat    time.Duration
+	logger       *log.Logger
+	debug        bool
 
 	mu            sync.RWMutex
 	sessions      map[string]*session
+	nextSessionID atomic.Uint64
 	nextRequestID atomic.Uint64
 }
 
 type session struct {
+	id         uint64
 	publicHost string
 	username   string
 	outbound   chan *tunnelpb.ServerFrame
@@ -124,8 +131,22 @@ func New(cfg Config) (*Server, error) {
 		tokenUsers:   tokenUsers,
 		publicHosts:  publicHosts,
 		heartbeat:    cfg.HeartbeatInterval,
+		logger:       cfg.Logger,
+		debug:        cfg.Debug,
 		sessions:     make(map[string]*session),
 	}, nil
+}
+
+func (s *Server) logf(format string, args ...any) {
+	if s.logger != nil {
+		s.logger.Printf(format, args...)
+	}
+}
+
+func (s *Server) debugf(format string, args ...any) {
+	if s.debug {
+		s.logf(format, args...)
+	}
 }
 
 func (s *Server) HasPublicHost(host string) bool {
@@ -220,7 +241,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Headers have already been written; the body is truncated.
 				// Log so operators can diagnose and stop reading to signal
 				// failure downstream.
-				log.Printf("muxbridge: request %s failed after headers: %v", requestID, err)
+				s.logf("muxbridge: request %s failed after headers: %v", requestID, err)
 			}
 			return
 		case <-r.Context().Done():
@@ -392,7 +413,12 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 	}
 
 	publicHost := hostnames.Subdomain(username, s.publicDomain)
+	peerAddr := "unknown"
+	if p, ok := peer.FromContext(stream.Context()); ok && p.Addr != nil {
+		peerAddr = p.Addr.String()
+	}
 	sess := &session{
+		id:         s.nextSessionID.Add(1),
 		publicHost: publicHost,
 		username:   username,
 		outbound:   make(chan *tunnelpb.ServerFrame, 64),
@@ -402,6 +428,7 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 	}
 	s.putSession(sess)
 	defer s.removeSession(sess.publicHost, sess)
+	s.debugf("edge debug: session=%d connected user=%s host=%s peer=%s", sess.id, sess.username, sess.publicHost, peerAddr)
 
 	sendErr := make(chan error, 1)
 	go func() {
@@ -467,8 +494,10 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 		shutdownErr = recvErr
 	}
 	sess.shutdown(shutdownErr)
+	s.debugf("edge debug: session=%d closing user=%s host=%s peer=%s recv_err=%v", sess.id, sess.username, sess.publicHost, peerAddr, recvErr)
 
 	if err := <-sendErr; err != nil && !errors.Is(err, context.Canceled) {
+		s.debugf("edge debug: session=%d send loop ended err=%v", sess.id, err)
 		return err
 	}
 	return recvErr
@@ -530,6 +559,7 @@ func (s *Server) forwardRequest(r *http.Request, sess *session, requestID string
 }
 
 func (s *Server) handleClientFrame(sess *session, frame *tunnelpb.ClientFrame) {
+	s.debugReceivedFrame(sess, frame)
 	switch msg := frame.GetMsg().(type) {
 	case *tunnelpb.ClientFrame_ResponseStart:
 		if rs := sess.get(msg.ResponseStart.GetRequestId()); rs != nil {
@@ -551,6 +581,7 @@ func (s *Server) handleClientFrame(sess *session, frame *tunnelpb.ClientFrame) {
 			rs.finish()
 		}
 	case *tunnelpb.ClientFrame_ResponseError:
+		s.logf("edge: session=%d response error request_id=%s message=%q", sess.id, msg.ResponseError.GetRequestId(), msg.ResponseError.GetMessage())
 		if rs := sess.get(msg.ResponseError.GetRequestId()); rs != nil {
 			rs.fail(errors.New(msg.ResponseError.GetMessage()))
 		}
@@ -578,6 +609,7 @@ func (s *Server) sendFrame(sess *session, frame *tunnelpb.ServerFrame) error {
 	case <-sess.done:
 		return errSessionClosed
 	case sess.outbound <- frame:
+		s.debugSentFrame(sess, frame)
 		return nil
 	}
 }
@@ -592,6 +624,7 @@ func (s *Server) sendFrameCtx(ctx context.Context, sess *session, frame *tunnelp
 	case <-ctx.Done():
 		return ctx.Err()
 	case sess.outbound <- frame:
+		s.debugSentFrame(sess, frame)
 		return nil
 	}
 }
@@ -635,6 +668,13 @@ func (s *Server) putSession(sess *session) {
 	s.mu.Unlock()
 
 	if replaced != nil && replaced != sess {
+		s.debugf(
+			"edge debug: session=%d replaced previous session=%d host=%s user=%s",
+			sess.id,
+			replaced.id,
+			sess.publicHost,
+			sess.username,
+		)
 		replaced.shutdown(errSessionReplaced)
 	}
 }
@@ -735,6 +775,63 @@ func (r *responseState) consumeErr() error {
 		return err
 	default:
 		return nil
+	}
+}
+
+func (s *Server) debugSentFrame(sess *session, frame *tunnelpb.ServerFrame) {
+	if !s.debug {
+		return
+	}
+	switch msg := frame.GetMsg().(type) {
+	case *tunnelpb.ServerFrame_RequestStart:
+		start := msg.RequestStart
+		s.logf(
+			"edge debug: session=%d sent request_start id=%s method=%s host=%s path=%s query=%q remote=%s",
+			sess.id,
+			start.GetRequestId(),
+			start.GetMethod(),
+			start.GetHost(),
+			start.GetPath(),
+			start.GetRawQuery(),
+			start.GetRemoteAddr(),
+		)
+	case *tunnelpb.ServerFrame_RequestBody:
+		s.logf("edge debug: session=%d sent request_body id=%s bytes=%d", sess.id, msg.RequestBody.GetRequestId(), len(msg.RequestBody.GetChunk()))
+	case *tunnelpb.ServerFrame_RequestEnd:
+		s.logf("edge debug: session=%d sent request_end id=%s", sess.id, msg.RequestEnd.GetRequestId())
+	case *tunnelpb.ServerFrame_CancelRequest:
+		s.logf("edge debug: session=%d sent cancel_request id=%s", sess.id, msg.CancelRequest.GetRequestId())
+	case *tunnelpb.ServerFrame_Ping:
+		s.logf("edge debug: session=%d sent ping unix_nano=%d", sess.id, msg.Ping.GetUnixNano())
+	case *tunnelpb.ServerFrame_WsData:
+		s.logf("edge debug: session=%d sent ws_data id=%s bytes=%d", sess.id, msg.WsData.GetRequestId(), len(msg.WsData.GetPayload()))
+	case *tunnelpb.ServerFrame_WsClose:
+		s.logf("edge debug: session=%d sent ws_close id=%s", sess.id, msg.WsClose.GetRequestId())
+	}
+}
+
+func (s *Server) debugReceivedFrame(sess *session, frame *tunnelpb.ClientFrame) {
+	if !s.debug {
+		return
+	}
+	switch msg := frame.GetMsg().(type) {
+	case *tunnelpb.ClientFrame_Register:
+		s.logf("edge debug: session=%d recv register", sess.id)
+	case *tunnelpb.ClientFrame_ResponseStart:
+		s.logf("edge debug: session=%d recv response_start id=%s status=%d", sess.id, msg.ResponseStart.GetRequestId(), msg.ResponseStart.GetStatusCode())
+	case *tunnelpb.ClientFrame_ResponseBody:
+		s.logf("edge debug: session=%d recv response_body id=%s bytes=%d", sess.id, msg.ResponseBody.GetRequestId(), len(msg.ResponseBody.GetChunk()))
+	case *tunnelpb.ClientFrame_ResponseEnd:
+		s.logf("edge debug: session=%d recv response_end id=%s", sess.id, msg.ResponseEnd.GetRequestId())
+	case *tunnelpb.ClientFrame_ResponseError:
+		s.logf("edge debug: session=%d recv response_error id=%s message=%q", sess.id, msg.ResponseError.GetRequestId(), msg.ResponseError.GetMessage())
+	case *tunnelpb.ClientFrame_WsData:
+		s.logf("edge debug: session=%d recv ws_data id=%s bytes=%d", sess.id, msg.WsData.GetRequestId(), len(msg.WsData.GetPayload()))
+	case *tunnelpb.ClientFrame_WsClose:
+		s.logf("edge debug: session=%d recv ws_close id=%s", sess.id, msg.WsClose.GetRequestId())
+	case *tunnelpb.ClientFrame_Pong:
+		rtt := time.Since(time.Unix(0, msg.Pong.GetUnixNano()))
+		s.logf("edge debug: session=%d recv pong unix_nano=%d rtt=%s", sess.id, msg.Pong.GetUnixNano(), rtt)
 	}
 }
 

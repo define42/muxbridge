@@ -49,6 +49,8 @@ func TestLoadConfigUsesEnvAndFlags(t *testing.T) {
 			return " edge.example.com:443 "
 		case "MUXBRIDGE_CLIENT_TOKEN":
 			return " env-token "
+		case "MUXBRIDGE_DEBUG":
+			return "true"
 		default:
 			return ""
 		}
@@ -64,6 +66,9 @@ func TestLoadConfigUsesEnvAndFlags(t *testing.T) {
 	}
 	if cfg.Token != "flag-token" {
 		t.Fatalf("Token = %q, want %q", cfg.Token, "flag-token")
+	}
+	if !cfg.Debug {
+		t.Fatal("Debug = false, want true")
 	}
 }
 
@@ -133,5 +138,22 @@ func TestGetenvTrimsWhitespace(t *testing.T) {
 	t.Setenv(key, "  value  ")
 	if got := getenv(key); got != "value" {
 		t.Fatalf("getenv = %q, want %q", got, "value")
+	}
+}
+
+func TestLoadConfigFlagOverridesDebugEnv(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig([]string{"--edge-addr", "edge.example.com:443", "--debug=false"}, func(key string) string {
+		if key == "MUXBRIDGE_DEBUG" {
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+	if cfg.Debug {
+		t.Fatal("Debug = true, want false")
 	}
 }

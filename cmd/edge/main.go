@@ -77,6 +77,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 	srv, err := server.New(server.Config{
 		PublicDomain: cfg.PublicDomain,
 		TokenUsers:   cfg.ClientCredentials,
+		Logger:       log.Default(),
+		Debug:        cfg.Debug,
 	})
 	if err != nil {
 		return err
@@ -122,6 +124,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 	}
 	go serve("HTTPS", httpsServer.Serve, tls.NewListener(httpsListener, tlsAssets.tlsConfig), serveErr)
 
+	if cfg.Debug {
+		log.Printf(
+			"edge debug enabled: edge_domain=%s public_domain=%s public_hosts=%s",
+			cfg.EdgeDomain,
+			cfg.PublicDomain,
+			strings.Join(srv.PublicHosts(), ", "),
+		)
+	}
 	log.Printf("edge listening on https://%s and http://:80", cfg.EdgeDomain)
 	select {
 	case err := <-serveErr:

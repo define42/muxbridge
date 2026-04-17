@@ -16,6 +16,7 @@ const (
 	clientCredentialsEnv = "MUXBRIDGE_CLIENT_CREDENTIALS"
 	tlsCertFileEnv       = "MUXBRIDGE_TLS_CERT_FILE"
 	tlsKeyFileEnv        = "MUXBRIDGE_TLS_KEY_FILE"
+	debugEnv             = "MUXBRIDGE_DEBUG"
 )
 
 type edgeConfig struct {
@@ -24,6 +25,7 @@ type edgeConfig struct {
 	ClientCredentials map[string]string
 	TLSCertFile       string
 	TLSKeyFile        string
+	Debug             bool
 }
 
 func (c edgeConfig) managedHosts() []string {
@@ -61,11 +63,14 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	var publicDomain string
 	var tlsCertFile string
 	var tlsKeyFile string
+	var debug bool
 	var credentialFlags repeatedFlag
 
+	debug = parseBoolString(getenv(debugEnv))
 	fs.StringVar(&publicDomain, "public-domain", "", "Public base domain")
 	fs.StringVar(&tlsCertFile, "tls-cert-file", "", "Static TLS certificate PEM file")
 	fs.StringVar(&tlsKeyFile, "tls-key-file", "", "Static TLS private key PEM file")
+	fs.BoolVar(&debug, "debug", debug, "Enable debug logging")
 	fs.Var(&credentialFlags, "client-credential", "Client credential in token=username form")
 
 	if err := fs.Parse(args); err != nil {
@@ -100,6 +105,7 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 		ClientCredentials: credentials,
 		TLSCertFile:       tlsCertFile,
 		TLSKeyFile:        tlsKeyFile,
+		Debug:             debug,
 	}, nil
 }
 
@@ -164,4 +170,13 @@ func parseCredential(entry string) (string, string, error) {
 	}
 
 	return token, username, nil
+}
+
+func parseBoolString(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

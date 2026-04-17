@@ -40,6 +40,7 @@ type Config struct {
 	Token            string
 	Handler          http.Handler
 	Insecure         bool
+	Debug            bool
 	ReconnectBackoff time.Duration
 	// DialTimeout bounds how long a single connect attempt may block before
 	// the reconnect loop gets a chance to try again. Defaults to 10 seconds
@@ -52,6 +53,7 @@ type Client struct {
 	cfg     Config
 	handler http.Handler
 	logger  *log.Logger
+	debug   bool
 
 	mu      sync.Mutex
 	closed  bool
@@ -126,6 +128,7 @@ func New(cfg Config) (*Client, error) {
 		cfg:     cfg,
 		handler: cfg.Handler,
 		logger:  cfg.Logger,
+		debug:   cfg.Debug,
 		closeCh: make(chan struct{}),
 	}, nil
 }
@@ -138,7 +141,10 @@ func (c *Client) Run(ctx context.Context) error {
 	closeCh := c.closeCh
 	c.mu.Unlock()
 
+	attempt := 0
 	for {
+		attempt++
+		c.debugf("client debug: dial attempt=%d edge_addr=%s", attempt, c.cfg.EdgeAddr)
 		err := c.runSession(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -149,6 +155,7 @@ func (c *Client) Run(ctx context.Context) error {
 		if err != nil && !errors.Is(err, context.Canceled) {
 			c.logf("tunnel session ended: %v", err)
 		}
+		c.debugf("client debug: reconnecting in %v", c.cfg.ReconnectBackoff)
 
 		timer := time.NewTimer(c.cfg.ReconnectBackoff)
 		select {
@@ -166,6 +173,12 @@ func (c *Client) Run(ctx context.Context) error {
 func (c *Client) logf(format string, args ...any) {
 	if c.logger != nil {
 		c.logger.Printf(format, args...)
+	}
+}
+
+func (c *Client) debugf(format string, args ...any) {
+	if c.debug {
+		c.logf(format, args...)
 	}
 }
 
@@ -200,6 +213,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	// loop indefinitely — the parent context may still be long-lived.
 	dialCtx, dialCancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
 	defer dialCancel()
+	c.debugf("client debug: opening grpc connection edge_addr=%s insecure=%t timeout=%s", c.cfg.EdgeAddr, c.cfg.Insecure, c.cfg.DialTimeout)
 	conn, err := grpc.DialContext(dialCtx, c.cfg.EdgeAddr, dialOpts...)
 	if err != nil {
 		return err
@@ -207,6 +221,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	defer func() {
 		_ = conn.Close()
 	}()
+	c.debugf("client debug: grpc connection ready")
 
 	c.setConn(conn)
 	defer c.clearConn(conn)
@@ -215,12 +230,21 @@ func (c *Client) runSession(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.debugf("client debug: tunnel stream opened")
 
 	var sendMu sync.Mutex
 	send := func(frame *tunnelpb.ClientFrame) error {
 		sendMu.Lock()
 		defer sendMu.Unlock()
-		return stream.Send(frame)
+		err := stream.Send(frame)
+		if err != nil {
+			if c.debug {
+				c.logf("client debug: send failed frame=%T err=%v", frame.GetMsg(), err)
+			}
+			return err
+		}
+		c.debugSentFrame(frame)
+		return nil
 	}
 
 	if err := send(&tunnelpb.ClientFrame{
@@ -286,10 +310,12 @@ func (c *Client) runSession(ctx context.Context) error {
 		frame, err := stream.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				c.debugf("client debug: stream closed cleanly by edge")
 				return nil
 			}
 			return err
 		}
+		c.debugReceivedFrame(frame)
 
 		switch msg := frame.GetMsg().(type) {
 		case *tunnelpb.ServerFrame_RequestStart:
@@ -397,6 +423,7 @@ func (c *Client) handleWebSocket(
 	defer done()
 
 	requestID := start.GetRequestId()
+	c.debugf("client debug: websocket start request_id=%s method=%s host=%s path=%s", requestID, start.GetMethod(), start.GetHost(), start.GetPath())
 
 	clientConn, serverConn := net.Pipe()
 	defer func() {
@@ -444,6 +471,7 @@ func (c *Client) handleWebSocket(
 		})
 		return
 	}
+	c.debugf("client debug: websocket response request_id=%s status=%d", requestID, resp.StatusCode)
 
 	if err := send(&tunnelpb.ClientFrame{
 		Msg: &tunnelpb.ClientFrame_ResponseStart{ResponseStart: &tunnelpb.ResponseStart{
@@ -521,14 +549,18 @@ func (c *Client) handleWebSocket(
 			if !ok {
 				_ = clientConn.Close()
 				<-readDone
+				c.debugf("client debug: websocket inbound closed request_id=%s", requestID)
 				return
 			}
 			if _, err := clientConn.Write(payload); err != nil {
+				c.debugf("client debug: websocket write failed request_id=%s err=%v", requestID, err)
 				return
 			}
 		case <-readDone:
+			c.debugf("client debug: websocket read loop finished request_id=%s", requestID)
 			return
 		case <-ctx.Done():
+			c.debugf("client debug: websocket context done request_id=%s err=%v", requestID, ctx.Err())
 			return
 		}
 	}
@@ -546,17 +578,76 @@ func (c *Client) serveRequest(
 	defer func() {
 		_ = inflight.bodyR.Close()
 	}()
+	c.debugf("client debug: handler start request_id=%s method=%s host=%s path=%s", requestID, req.Method, req.Host, req.URL.RequestURI())
 
 	w := newTunnelResponseWriter(requestID, send)
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			c.logf("client debug: handler panic request_id=%s panic=%v", requestID, recovered)
 			_ = w.Fail(fmt.Errorf("panic while serving request: %v", recovered))
 			return
 		}
+		c.debugf("client debug: handler finished request_id=%s", requestID)
 		_ = w.Finish()
 	}()
 
 	c.handler.ServeHTTP(w, req)
+}
+
+func (c *Client) debugReceivedFrame(frame *tunnelpb.ServerFrame) {
+	if !c.debug {
+		return
+	}
+	switch msg := frame.GetMsg().(type) {
+	case *tunnelpb.ServerFrame_RequestStart:
+		start := msg.RequestStart
+		c.logf(
+			"client debug: recv request_start id=%s method=%s host=%s path=%s query=%q websocket=%t remote=%s",
+			start.GetRequestId(),
+			start.GetMethod(),
+			start.GetHost(),
+			start.GetPath(),
+			start.GetRawQuery(),
+			isWebSocketUpgrade(start),
+			start.GetRemoteAddr(),
+		)
+	case *tunnelpb.ServerFrame_RequestBody:
+		c.logf("client debug: recv request_body id=%s bytes=%d", msg.RequestBody.GetRequestId(), len(msg.RequestBody.GetChunk()))
+	case *tunnelpb.ServerFrame_RequestEnd:
+		c.logf("client debug: recv request_end id=%s", msg.RequestEnd.GetRequestId())
+	case *tunnelpb.ServerFrame_CancelRequest:
+		c.logf("client debug: recv cancel_request id=%s", msg.CancelRequest.GetRequestId())
+	case *tunnelpb.ServerFrame_WsData:
+		c.logf("client debug: recv ws_data id=%s bytes=%d", msg.WsData.GetRequestId(), len(msg.WsData.GetPayload()))
+	case *tunnelpb.ServerFrame_WsClose:
+		c.logf("client debug: recv ws_close id=%s", msg.WsClose.GetRequestId())
+	case *tunnelpb.ServerFrame_Ping:
+		c.logf("client debug: recv ping unix_nano=%d", msg.Ping.GetUnixNano())
+	}
+}
+
+func (c *Client) debugSentFrame(frame *tunnelpb.ClientFrame) {
+	if !c.debug {
+		return
+	}
+	switch msg := frame.GetMsg().(type) {
+	case *tunnelpb.ClientFrame_Register:
+		c.logf("client debug: sent register")
+	case *tunnelpb.ClientFrame_ResponseStart:
+		c.logf("client debug: sent response_start id=%s status=%d", msg.ResponseStart.GetRequestId(), msg.ResponseStart.GetStatusCode())
+	case *tunnelpb.ClientFrame_ResponseBody:
+		c.logf("client debug: sent response_body id=%s bytes=%d", msg.ResponseBody.GetRequestId(), len(msg.ResponseBody.GetChunk()))
+	case *tunnelpb.ClientFrame_ResponseEnd:
+		c.logf("client debug: sent response_end id=%s", msg.ResponseEnd.GetRequestId())
+	case *tunnelpb.ClientFrame_ResponseError:
+		c.logf("client debug: sent response_error id=%s message=%q", msg.ResponseError.GetRequestId(), msg.ResponseError.GetMessage())
+	case *tunnelpb.ClientFrame_WsData:
+		c.logf("client debug: sent ws_data id=%s bytes=%d", msg.WsData.GetRequestId(), len(msg.WsData.GetPayload()))
+	case *tunnelpb.ClientFrame_WsClose:
+		c.logf("client debug: sent ws_close id=%s", msg.WsClose.GetRequestId())
+	case *tunnelpb.ClientFrame_Pong:
+		c.logf("client debug: sent pong unix_nano=%d", msg.Pong.GetUnixNano())
+	}
 }
 
 func requestURL(start *tunnelpb.RequestStart) string {

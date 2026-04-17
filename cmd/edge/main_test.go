@@ -192,6 +192,43 @@ func TestLoadConfigFlagOverridesEnvStaticTLSFiles(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsDebugEnvAndFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(key string) string {
+		if key == debugEnv {
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+	if !cfg.Debug {
+		t.Fatal("Debug = false, want true")
+	}
+
+	cfg, err = loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+		"--debug=false",
+	}, func(key string) string {
+		if key == debugEnv {
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+	if cfg.Debug {
+		t.Fatal("Debug = true, want false")
+	}
+}
+
 func TestEdgeConfigManagedHostsAndSortedUsers(t *testing.T) {
 	t.Parallel()
 

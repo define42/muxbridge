@@ -19,6 +19,7 @@ type demoConfig struct {
 	PublicDomain string
 	EdgeAddr     string
 	Token        string
+	Debug        bool
 }
 
 var slowChunkDelay = 500 * time.Millisecond
@@ -41,10 +42,22 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 		EdgeAddr: cfg.EdgeAddr,
 		Token:    cfg.Token,
 		Handler:  mux,
+		Debug:    cfg.Debug,
 		Logger:   log.Default(),
 	})
 	if err != nil {
 		return err
+	}
+	if cfg.Debug {
+		reconnectBackoff := 2 * time.Second
+		dialTimeout := 10 * time.Second
+		log.Printf(
+			"client debug enabled: edge_addr=%s public_domain=%s reconnect_backoff=%s dial_timeout=%s",
+			cfg.EdgeAddr,
+			cfg.PublicDomain,
+			reconnectBackoff,
+			dialTimeout,
+		)
 	}
 
 	return cli.Run(ctx)
@@ -58,11 +71,13 @@ func loadConfig(args []string, getenv func(string) string) (demoConfig, error) {
 		PublicDomain: getenv("MUXBRIDGE_PUBLIC_DOMAIN"),
 		EdgeAddr:     getenv("MUXBRIDGE_EDGE_ADDR"),
 		Token:        defaultString(getenv("MUXBRIDGE_CLIENT_TOKEN"), "demo-token"),
+		Debug:        parseBoolString(getenv("MUXBRIDGE_DEBUG")),
 	}
 
 	fs.StringVar(&cfg.PublicDomain, "public-domain", cfg.PublicDomain, "Public base domain for the edge")
 	fs.StringVar(&cfg.EdgeAddr, "edge-addr", cfg.EdgeAddr, "Edge gRPC address")
 	fs.StringVar(&cfg.Token, "token", cfg.Token, "Client authentication token")
+	fs.BoolVar(&cfg.Debug, "debug", cfg.Debug, "Enable debug logging")
 	if err := fs.Parse(args); err != nil {
 		return demoConfig{}, err
 	}
@@ -110,6 +125,15 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func parseBoolString(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func getenv(key string) string {
