@@ -142,6 +142,7 @@ Both must be provided together.
 ```text
 MUXBRIDGE_PUBLIC_DOMAIN
 MUXBRIDGE_CLIENT_CREDENTIALS
+MUXBRIDGH_DATA
 MUXBRIDGE_TLS_CERT_FILE
 MUXBRIDGE_TLS_KEY_FILE
 MUXBRIDGE_DEBUG
@@ -154,6 +155,8 @@ demo-token=demo,admin-token=admin
 ```
 
 Because entries are comma-separated, tokens supplied via `MUXBRIDGE_CLIENT_CREDENTIALS` must not contain `,`. Tokens that contain commas must be provided via repeated `--client-credential` flags instead.
+
+`MUXBRIDGH_DATA` sets the single persistent data directory used by the edge. When the edge manages TLS with CertMagic, certificates, ACME account data, OCSP cache entries, and lock files are all stored here. `MUXBRIDGE_DATA` is also accepted as a compatibility alias.
 
 Flag credential entries are appended after environment entries. Credential values are trimmed, usernames are normalized to lowercase before validation, and startup fails on malformed entries, duplicate tokens, duplicate usernames, invalid usernames, usernames with ports such as `demo:443`, or reserved username `edge`.
 
@@ -285,12 +288,7 @@ https://demo.example.com/
 
 ## Docker
 
-A minimal Alpine-based image is provided. The edge binary is the entrypoint and exposes ports `80` and `443`. CertMagic data and config directories are configured via:
-
-```text
-XDG_DATA_HOME=/var/lib/muxbridge
-XDG_CONFIG_HOME=/etc/muxbridge
-```
+A minimal Alpine-based image is provided. The edge binary is the entrypoint and exposes ports `80` and `443`. All persistent edge data, including CertMagic certificates, is stored under `MUXBRIDGH_DATA`, which defaults to `/var/lib/muxbridge` in the container image.
 
 Example `docker-compose.yml`:
 
@@ -305,9 +303,9 @@ services:
     environment:
       MUXBRIDGE_PUBLIC_DOMAIN: example.com
       MUXBRIDGE_CLIENT_CREDENTIALS: demo-token=demo
+      MUXBRIDGH_DATA: /var/lib/muxbridge
     volumes:
       - ./muxbridge-data:/var/lib/muxbridge
-      - ./muxbridge-config:/etc/muxbridge
 ```
 
 Then start the edge with:

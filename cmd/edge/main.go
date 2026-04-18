@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -228,18 +229,55 @@ func edgeTLSAssetsFor(cfg edgeConfig) (edgeTLSAssets, error) {
 	certmagic.DefaultACME.Agreed = true
 	certmagic.DefaultACME.DisableTLSALPNChallenge = true
 
-	certConfig := certmagic.NewDefault()
+	dataDir := cfg.DataDir
+	if dataDir == "" {
+		dataDir = resolveDataDir(getenv)
+	}
+
+	certConfig, stopCache := newManagedCertMagicConfig(dataDir)
 	managedHosts := cfg.managedHosts()
 	tlsConfig := certConfig.TLSConfig()
 	tlsConfig.NextProtos = appendMissing(tlsConfig.NextProtos, "h2", "http/1.1")
+
+	var stopOnce sync.Once
+	stopManagedCache := func() {
+		stopOnce.Do(stopCache)
+	}
+
 	return edgeTLSAssets{
 		tlsConfig:   tlsConfig,
 		httpHandler: wrapHTTPChallenge(certConfig, http.HandlerFunc(redirectToHTTPS)),
 		manage: func(ctx context.Context) error {
-			log.Printf("managing TLS certificates for %s", strings.Join(managedHosts, ", "))
-			return certConfig.ManageSync(ctx, managedHosts)
+			go func() {
+				<-ctx.Done()
+				stopManagedCache()
+			}()
+
+			log.Printf("managing TLS certificates for %s using %s", strings.Join(managedHosts, ", "), dataDir)
+			if err := certConfig.ManageSync(ctx, managedHosts); err != nil {
+				stopManagedCache()
+				return err
+			}
+			return nil
 		},
 	}, nil
+}
+
+func newManagedCertMagicConfig(dataDir string) (*certmagic.Config, func()) {
+	storage := &certmagic.FileStorage{Path: dataDir}
+
+	var cache *certmagic.Cache
+	cache = certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
+			return certmagic.New(cache, certmagic.Config{
+				Storage: storage,
+			}), nil
+		},
+	})
+
+	return certmagic.New(cache, certmagic.Config{
+		Storage: storage,
+	}), cache.Stop
 }
 
 func newStatusHandler(startedAt time.Time, now func() time.Time) http.Handler {

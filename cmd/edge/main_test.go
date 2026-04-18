@@ -100,6 +100,48 @@ func TestLoadConfigStaticTLSFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsDataDirFromEnv(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(key string) string {
+		if key == dataDirEnv {
+			return " /tmp/muxbridge-data/managed/ "
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+
+	if cfg.DataDir != "/tmp/muxbridge-data/managed" {
+		t.Fatalf("DataDir = %q, want %q", cfg.DataDir, "/tmp/muxbridge-data/managed")
+	}
+}
+
+func TestLoadConfigReadsDataDirCompatEnv(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(key string) string {
+		if key == dataDirCompatEnv {
+			return "/tmp/muxbridge-data"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+
+	if cfg.DataDir != "/tmp/muxbridge-data" {
+		t.Fatalf("DataDir = %q, want %q", cfg.DataDir, "/tmp/muxbridge-data")
+	}
+}
+
 func TestLoadConfigRejectsIncompleteStaticTLSConfig(t *testing.T) {
 	t.Parallel()
 
@@ -423,6 +465,22 @@ func TestEdgeTLSAssetsForManagedTLS(t *testing.T) {
 	}
 	if got := res.Header().Get("Location"); got != "https://edge.example.com/path?x=1" {
 		t.Fatalf("Location = %q, want %q", got, "https://edge.example.com/path?x=1")
+	}
+}
+
+func TestNewManagedCertMagicConfigUsesConfiguredStorage(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	cfg, stopCache := newManagedCertMagicConfig(dataDir)
+	t.Cleanup(stopCache)
+
+	storage, ok := cfg.Storage.(*certmagic.FileStorage)
+	if !ok {
+		t.Fatalf("Storage type = %T, want *certmagic.FileStorage", cfg.Storage)
+	}
+	if storage.Path != dataDir {
+		t.Fatalf("storage.Path = %q, want %q", storage.Path, dataDir)
 	}
 }
 

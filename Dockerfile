@@ -19,10 +19,9 @@ FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates
 
-ENV XDG_DATA_HOME=/var/lib/muxbridge \
-    XDG_CONFIG_HOME=/etc/muxbridge
+ENV MUXBRIDGH_DATA=/var/lib/muxbridge
 
-RUN mkdir -p /var/lib/muxbridge /etc/muxbridge
+RUN mkdir -p /var/lib/muxbridge
 
 COPY --from=build /out/edge /usr/local/bin/edge
 

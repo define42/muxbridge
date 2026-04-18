@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -17,6 +19,8 @@ const (
 	tlsCertFileEnv       = "MUXBRIDGE_TLS_CERT_FILE"
 	tlsKeyFileEnv        = "MUXBRIDGE_TLS_KEY_FILE"
 	debugEnv             = "MUXBRIDGE_DEBUG"
+	dataDirEnv           = "MUXBRIDGH_DATA"
+	dataDirCompatEnv     = "MUXBRIDGE_DATA"
 )
 
 type edgeConfig struct {
@@ -26,6 +30,7 @@ type edgeConfig struct {
 	TLSCertFile       string
 	TLSKeyFile        string
 	Debug             bool
+	DataDir           string
 }
 
 func (c edgeConfig) managedHosts() []string {
@@ -86,6 +91,7 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	if tlsKeyFile == "" {
 		tlsKeyFile = strings.TrimSpace(getenv(tlsKeyFileEnv))
 	}
+	dataDir := resolveDataDir(getenv)
 	publicDomain = hostnames.NormalizeDomain(publicDomain)
 	if err := hostnames.ValidateDomain(publicDomain); err != nil {
 		return edgeConfig{}, fmt.Errorf("invalid public domain: %w", err)
@@ -106,7 +112,22 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 		TLSCertFile:       tlsCertFile,
 		TLSKeyFile:        tlsKeyFile,
 		Debug:             debug,
+		DataDir:           dataDir,
 	}, nil
+}
+
+func resolveDataDir(getenv func(string) string) string {
+	for _, key := range []string{dataDirEnv, dataDirCompatEnv} {
+		if dir := strings.TrimSpace(getenv(key)); dir != "" {
+			return filepath.Clean(dir)
+		}
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err == nil && strings.TrimSpace(homeDir) != "" {
+		return filepath.Join(homeDir, ".local", "share", "muxbridge")
+	}
+	return filepath.Clean("muxbridge-data")
 }
 
 func parseCredentials(envValue string, cliValues []string) (map[string]string, error) {
