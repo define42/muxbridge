@@ -103,7 +103,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 		cfg.PublicDomain,
 		cfg.EdgeDomain,
 		srv.HasPublicHost,
-		newStatusHandler(startedAt, time.Now),
+		newStatusHandler(startedAt, time.Now, func() (int, int) {
+			return srv.TotalInflight(), srv.MaxTotalInflight()
+		}),
 		srv,
 		grpcServer,
 		pprofHandler,
@@ -293,9 +295,12 @@ func newManagedCertMagicConfig(dataDir string) (*certmagic.Config, func()) {
 	}), cache.Stop
 }
 
-func newStatusHandler(startedAt time.Time, now func() time.Time) http.Handler {
+func newStatusHandler(startedAt time.Time, now func() time.Time, inflight func() (int, int)) http.Handler {
 	if now == nil {
 		now = time.Now
+	}
+	if inflight == nil {
+		inflight = func() (int, int) { return 0, 0 }
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -304,9 +309,10 @@ func newStatusHandler(startedAt time.Time, now func() time.Time) http.Handler {
 			uptime = 0
 		}
 		uptime = uptime.Truncate(time.Second)
+		currentInflight, maxInflight := inflight()
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "MuxBridgh active with uptime %s", uptime)
+		_, _ = fmt.Fprintf(w, "MuxBridgh active with uptime %s\ninflight requests: %d/%d", uptime, currentInflight, maxInflight)
 	})
 }
 

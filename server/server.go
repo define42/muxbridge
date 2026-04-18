@@ -199,6 +199,14 @@ func (s *Server) PublicHosts() []string {
 	return out
 }
 
+func (s *Server) TotalInflight() int {
+	return int(s.totalInflight.Load())
+}
+
+func (s *Server) MaxTotalInflight() int {
+	return s.maxTotalInflight
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := hostnames.NormalizeHost(r.Host)
 	if !s.HasPublicHost(host) {

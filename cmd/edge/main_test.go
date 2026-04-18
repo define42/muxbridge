@@ -575,6 +575,8 @@ func TestNewStatusHandlerShowsUptime(t *testing.T) {
 	startedAt := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
 	handler := newStatusHandler(startedAt, func() time.Time {
 		return startedAt.Add(65*time.Second + 250*time.Millisecond)
+	}, func() (int, int) {
+		return 7, 512
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
@@ -588,8 +590,8 @@ func TestNewStatusHandlerShowsUptime(t *testing.T) {
 	if got := res.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
 		t.Fatalf("Content-Type = %q, want %q", got, "text/plain; charset=utf-8")
 	}
-	if got := res.Body.String(); got != "MuxBridgh active with uptime 1m5s" {
-		t.Fatalf("body = %q, want %q", got, "MuxBridgh active with uptime 1m5s")
+	if got := res.Body.String(); got != "MuxBridgh active with uptime 1m5s\ninflight requests: 7/512" {
+		t.Fatalf("body = %q, want %q", got, "MuxBridgh active with uptime 1m5s\ninflight requests: 7/512")
 	}
 }
 
