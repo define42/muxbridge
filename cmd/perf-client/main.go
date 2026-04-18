@@ -162,7 +162,9 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 	if err := waitForReady(readyCtx, cfg.publicBaseURL(), readyClient, defaultReadyPollPeriod, tunnelErrCh); err != nil {
 		cancel()
 		_ = cli.Close()
-		waitForClientExit(tunnelErrCh, 2*time.Second)
+		if tunnelErr := waitForClientExit(tunnelErrCh, 2*time.Second); tunnelErr != nil && cfg.Debug {
+			log.Printf("perf client debug: tunnel exited during readiness failure: %v", tunnelErr)
+		}
 		return fmt.Errorf("public host %s did not become ready: %w", cfg.PublicHost, err)
 	}
 
@@ -372,7 +374,6 @@ func waitForReady(
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
-			err = fmt.Errorf("health check returned %s", resp.Status)
 		}
 
 		select {

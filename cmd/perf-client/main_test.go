@@ -267,7 +267,7 @@ func TestNewPerfMuxHandlers(t *testing.T) {
 		if got := res.Header().Get("Content-Type"); !strings.Contains(got, tc.contentType) {
 			t.Fatalf("%s content type = %q, want to contain %q", tc.path, got, tc.contentType)
 		}
-		if tc.wantBody != nil && string(res.Body.Bytes()) != string(tc.wantBody) {
+		if tc.wantBody != nil && res.Body.String() != string(tc.wantBody) {
 			t.Fatalf("%s body = %q, want %q", tc.path, res.Body.Bytes(), tc.wantBody)
 		}
 		if tc.wantBodySize > 0 && res.Body.Len() != tc.wantBodySize {
