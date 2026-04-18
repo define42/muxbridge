@@ -91,6 +91,7 @@ The edge server listens on:
 
 Requests are routed like this:
 
+- `<public-domain>` -> `MuxBridgh active with uptime <duration>`
 - `edge.<public-domain>` with gRPC over HTTP/2 -> tunnel control plane
 - `edge.<public-domain>` without gRPC -> `404`
 - `<username>.<public-domain>` -> proxied through the authenticated client session
@@ -102,6 +103,7 @@ If the same user connects again, the newest connection replaces the old one.
 
 By default, the edge server uses CertMagic and manages certificates for:
 
+- `<public-domain>`
 - `edge.<public-domain>`
 - every configured `<username>.<public-domain>`
 

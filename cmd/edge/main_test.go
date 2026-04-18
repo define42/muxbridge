@@ -244,20 +244,26 @@ func TestEdgeConfigManagedHostsAndSortedUsers(t *testing.T) {
 	if got := cfg.sortedUsers(); len(got) != 2 || got[0] != "alpha" || got[1] != "zebra" {
 		t.Fatalf("sortedUsers = %#v, want [alpha zebra]", got)
 	}
-	if got := cfg.managedHosts(); len(got) != 3 || got[0] != "edge.example.com" || got[1] != "alpha.example.com" || got[2] != "zebra.example.com" {
-		t.Fatalf("managedHosts = %#v, want edge/alpha/zebra", got)
+	if got := cfg.managedHosts(); len(got) != 4 || got[0] != "example.com" || got[1] != "edge.example.com" || got[2] != "alpha.example.com" || got[3] != "zebra.example.com" {
+		t.Fatalf("managedHosts = %#v, want apex/edge/alpha/zebra", got)
 	}
 }
 
 func TestNewHTTPSHandlerDispatch(t *testing.T) {
 	t.Parallel()
 
+	statusCalls := 0
 	publicCalls := 0
 	grpcCalls := 0
 
 	handler := newHTTPSHandler(
+		"example.com",
 		"edge.example.com",
 		func(host string) bool { return host == "demo.example.com" },
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			statusCalls++
+			w.WriteHeader(http.StatusOK)
+		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			publicCalls++
 			w.WriteHeader(http.StatusAccepted)
@@ -286,6 +292,14 @@ func TestNewHTTPSHandlerDispatch(t *testing.T) {
 		t.Fatalf("public response = %d, want %d", publicRes.Code, http.StatusAccepted)
 	}
 
+	statusReq := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+	statusReq.Host = "EXAMPLE.COM:443"
+	statusRes := httptest.NewRecorder()
+	handler.ServeHTTP(statusRes, statusReq)
+	if statusRes.Code != http.StatusOK {
+		t.Fatalf("status response = %d, want %d", statusRes.Code, http.StatusOK)
+	}
+
 	edgeReq := httptest.NewRequest(http.MethodGet, "https://edge.example.com/", nil)
 	edgeReq.Host = "edge.example.com"
 	edgeRes := httptest.NewRecorder()
@@ -305,8 +319,35 @@ func TestNewHTTPSHandlerDispatch(t *testing.T) {
 	if grpcCalls != 1 {
 		t.Fatalf("grpcCalls = %d, want %d", grpcCalls, 1)
 	}
+	if statusCalls != 1 {
+		t.Fatalf("statusCalls = %d, want %d", statusCalls, 1)
+	}
 	if publicCalls != 1 {
 		t.Fatalf("publicCalls = %d, want %d", publicCalls, 1)
+	}
+}
+
+func TestNewStatusHandlerShowsUptime(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	handler := newStatusHandler(startedAt, func() time.Time {
+		return startedAt.Add(65*time.Second + 250*time.Millisecond)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+	req.Host = "example.com"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", res.Code, http.StatusOK)
+	}
+	if got := res.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want %q", got, "text/plain; charset=utf-8")
+	}
+	if got := res.Body.String(); got != "MuxBridgh active with uptime 1m5s" {
+		t.Fatalf("body = %q, want %q", got, "MuxBridgh active with uptime 1m5s")
 	}
 }
 

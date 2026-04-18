@@ -73,6 +73,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 	if err != nil {
 		return err
 	}
+	startedAt := time.Now()
 
 	srv, err := server.New(server.Config{
 		PublicDomain: cfg.PublicDomain,
@@ -87,7 +88,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 	grpcServer := newEdgeGRPCServer()
 	tunnelpb.RegisterTunnelServiceServer(grpcServer, srv)
 
-	httpsHandler := newHTTPSHandler(cfg.EdgeDomain, srv.HasPublicHost, srv, grpcServer)
+	httpsHandler := newHTTPSHandler(
+		cfg.PublicDomain,
+		cfg.EdgeDomain,
+		srv.HasPublicHost,
+		newStatusHandler(startedAt, time.Now),
+		srv,
+		grpcServer,
+	)
 	tlsAssets, err := edgeTLSAssetsFor(cfg)
 	if err != nil {
 		return err
@@ -234,7 +242,24 @@ func edgeTLSAssetsFor(cfg edgeConfig) (edgeTLSAssets, error) {
 	}, nil
 }
 
-func newHTTPSHandler(edgeDomain string, isPublicHost func(string) bool, publicHandler http.Handler, grpcHandler http.Handler) http.Handler {
+func newStatusHandler(startedAt time.Time, now func() time.Time) http.Handler {
+	if now == nil {
+		now = time.Now
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uptime := now().Sub(startedAt)
+		if uptime < 0 {
+			uptime = 0
+		}
+		uptime = uptime.Truncate(time.Second)
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "MuxBridgh active with uptime %s", uptime)
+	})
+}
+
+func newHTTPSHandler(publicDomain, edgeDomain string, isPublicHost func(string) bool, statusHandler, publicHandler http.Handler, grpcHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostnames.NormalizeHost(r.Host)
 
@@ -243,6 +268,8 @@ func newHTTPSHandler(edgeDomain string, isPublicHost func(string) bool, publicHa
 			grpcHandler.ServeHTTP(w, r)
 		case host == edgeDomain:
 			http.NotFound(w, r)
+		case host == publicDomain:
+			statusHandler.ServeHTTP(w, r)
 		case isPublicHost(host):
 			publicHandler.ServeHTTP(w, r)
 		default:

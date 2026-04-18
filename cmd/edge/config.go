@@ -29,7 +29,7 @@ type edgeConfig struct {
 }
 
 func (c edgeConfig) managedHosts() []string {
-	hosts := []string{c.EdgeDomain}
+	hosts := []string{c.PublicDomain, c.EdgeDomain}
 	for _, username := range c.sortedUsers() {
 		hosts = append(hosts, hostnames.Subdomain(username, c.PublicDomain))
 	}
