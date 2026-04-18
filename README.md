@@ -292,6 +292,30 @@ XDG_DATA_HOME=/var/lib/muxbridge
 XDG_CONFIG_HOME=/etc/muxbridge
 ```
 
+Example `docker-compose.yml`:
+
+```yaml
+services:
+  muxbridge:
+    image: ghcr.io/define42/muxbridge:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MUXBRIDGE_PUBLIC_DOMAIN: example.com
+      MUXBRIDGE_CLIENT_CREDENTIALS: demo-token=demo
+    volumes:
+      - ./muxbridge-data:/var/lib/muxbridge
+      - ./muxbridge-config:/etc/muxbridge
+```
+
+Then start the edge with:
+
+```bash
+docker compose up -d
+```
+
 ## Using the Tunnel Package
 
 To expose your own `http.Handler` instead of the demo app, import the `tunnel` package:
