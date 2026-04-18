@@ -15,14 +15,16 @@ COPY tunnel ./tunnel
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/edge ./cmd/edge
 
-FROM alpine:3.22
+FROM alpine:3.22 AS certs
 
 RUN apk add --no-cache ca-certificates
 
+FROM scratch
+
 ENV MUXBRIDGH_DATA=/var/lib/muxbridge
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-RUN mkdir -p /var/lib/muxbridge
-
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/edge /usr/local/bin/edge
 
 EXPOSE 80 443

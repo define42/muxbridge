@@ -297,6 +297,7 @@ services:
   muxbridge:
     image: ghcr.io/define42/muxbridge:latest
     restart: unless-stopped
+    read_only: true
     ports:
       - "80:80"
       - "443:443"
@@ -307,6 +308,8 @@ services:
     volumes:
       - ./muxbridge-data:/var/lib/muxbridge
 ```
+
+With `read_only: true`, the container root filesystem stays read-only and only the mounted data directory remains writable.
 
 Then start the edge with:
 
