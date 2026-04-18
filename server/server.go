@@ -39,6 +39,7 @@ const (
 	sessionOutboundQueueDepth    = 16
 	responseBodyQueueDepth       = 4
 	wsInboundQueueDepth          = 4
+	publicBadGatewayMessage      = "upstream tunnel request failed"
 )
 
 type inflightLimit int
@@ -237,7 +238,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, r.Context().Err()) {
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		s.writeBadGateway(w, sess, requestID, err)
 		return
 	}
 
@@ -249,7 +250,7 @@ writeHeaders:
 			w.WriteHeader(int(start.StatusCode))
 			break writeHeaders
 		case err := <-state.err:
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			s.writeBadGateway(w, sess, requestID, err)
 			return
 		case <-state.done:
 			if start := state.consumeStart(); start != nil {
@@ -258,10 +259,11 @@ writeHeaders:
 				break writeHeaders
 			}
 			// The client finished without sending ResponseStart. If an error was
-			// reported, surface it; otherwise treat the empty response as a 502
-			// so the browser doesn't see a bogus 200.
+			// reported, return a fixed 502 and keep the detail in edge logs;
+			// otherwise treat the empty response as a 502 so the browser doesn't
+			// see a bogus 200.
 			if err := state.consumeErr(); err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
+				s.writeBadGateway(w, sess, requestID, err)
 				return
 			}
 			http.Error(w, "tunnel closed response before sending headers", http.StatusBadGateway)
@@ -337,7 +339,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 		if errors.Is(err, context.Canceled) || errors.Is(err, r.Context().Err()) {
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		s.writeBadGateway(w, sess, requestID, err)
 		return
 	}
 
@@ -345,9 +347,13 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *se
 	select {
 	case responseStart = <-state.start:
 	case err := <-state.err:
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		s.writeBadGateway(w, sess, requestID, err)
 		return
 	case <-state.done:
+		if err := state.consumeErr(); err != nil {
+			s.writeBadGateway(w, sess, requestID, err)
+			return
+		}
 		http.Error(w, "tunnel closed connection", http.StatusBadGateway)
 		return
 	case <-sess.done:
@@ -678,6 +684,13 @@ func (s *Server) sendFrame(sess *session, frame *tunnelpb.ServerFrame) error {
 		s.debugSentFrame(sess, frame)
 		return nil
 	}
+}
+
+func (s *Server) writeBadGateway(w http.ResponseWriter, sess *session, requestID string, err error) {
+	if err != nil {
+		s.logf("edge: session=%d request_id=%s public_host=%s bad gateway detail=%q", sess.id, requestID, sess.publicHost, err.Error())
+	}
+	http.Error(w, publicBadGatewayMessage, http.StatusBadGateway)
 }
 
 // sendFrameCtx enqueues a frame like sendFrame but also aborts when the

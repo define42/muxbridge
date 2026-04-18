@@ -332,6 +332,76 @@ func TestServeHTTPRoutesNormalizedKnownHost(t *testing.T) {
 	}
 }
 
+func TestServeHTTPHidesUpstreamErrorDetails(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	srv, err := New(Config{
+		PublicDomain: "example.com",
+		TokenUsers: map[string]string{
+			"demo-token": "demo",
+		},
+		Logger: log.New(&logBuf, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 2),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	srv.putSession(sess)
+
+	req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/hello", nil)
+	req.Host = "demo.example.com"
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(res, req)
+		close(done)
+	}()
+
+	startFrame := <-sess.outbound
+	requestStart := startFrame.GetRequestStart()
+	if requestStart == nil {
+		t.Fatalf("first frame = %T, want request start", startFrame.GetMsg())
+	}
+	<-sess.outbound // request end
+
+	waitForState(t, sess, requestStart.RequestId)
+	malicious := "<script>alert(1)</script>"
+	srv.handleClientFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseError{ResponseError: &tunnelpb.ResponseError{
+			RequestId: requestStart.RequestId,
+			Message:   malicious,
+		}},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not return")
+	}
+
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+	if got := res.Body.String(); got != publicBadGatewayMessage+"\n" {
+		t.Fatalf("body = %q, want %q", got, publicBadGatewayMessage+"\\n")
+	}
+	if strings.Contains(res.Body.String(), malicious) {
+		t.Fatalf("body = %q, should not include upstream detail", res.Body.String())
+	}
+	if got := logBuf.String(); !strings.Contains(got, malicious) {
+		t.Fatalf("log output = %q, want upstream detail", got)
+	}
+}
+
 func TestServeHTTPRejectsUnknownPublicHost(t *testing.T) {
 	t.Parallel()
 
@@ -403,6 +473,78 @@ func TestServeWebSocketReturnsServiceUnavailableWhenInflightLimitReached(t *test
 
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServeWebSocketHidesUpstreamErrorDetails(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	srv, err := New(Config{
+		PublicDomain: "example.com",
+		TokenUsers: map[string]string{
+			"demo-token": "demo",
+		},
+		Logger: log.New(&logBuf, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 2),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+		wsMap:      make(map[string]*wsState),
+	}
+	srv.putSession(sess)
+
+	req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/ws", nil)
+	req.Host = "demo.example.com"
+	req.Header.Set("Upgrade", "websocket")
+	res := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(res, req)
+		close(done)
+	}()
+
+	startFrame := <-sess.outbound
+	requestStart := startFrame.GetRequestStart()
+	if requestStart == nil {
+		t.Fatalf("first frame = %T, want request start", startFrame.GetMsg())
+	}
+	<-sess.outbound // request end
+
+	waitForState(t, sess, requestStart.RequestId)
+	malicious := "tenant-controlled websocket failure"
+	srv.handleClientFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseError{ResponseError: &tunnelpb.ResponseError{
+			RequestId: requestStart.RequestId,
+			Message:   malicious,
+		}},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not return")
+	}
+
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+	if got := res.Body.String(); got != publicBadGatewayMessage+"\n" {
+		t.Fatalf("body = %q, want %q", got, publicBadGatewayMessage+"\\n")
+	}
+	if strings.Contains(res.Body.String(), malicious) {
+		t.Fatalf("body = %q, should not include upstream detail", res.Body.String())
+	}
+	if got := logBuf.String(); !strings.Contains(got, malicious) {
+		t.Fatalf("log output = %q, want upstream detail", got)
 	}
 }
 

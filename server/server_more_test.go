@@ -395,8 +395,8 @@ func TestServeHTTPReturnsResponseError(t *testing.T) {
 	if res.Code != http.StatusBadGateway {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
 	}
-	if !strings.Contains(res.Body.String(), "boom") {
-		t.Fatalf("body = %q, want boom message", res.Body.String())
+	if got := res.Body.String(); got != publicBadGatewayMessage+"\n" {
+		t.Fatalf("body = %q, want %q", got, publicBadGatewayMessage+"\\n")
 	}
 }
 
@@ -722,6 +722,9 @@ func TestServeWebSocketReturnsBadGatewayWhenSessionCloses(t *testing.T) {
 	}
 	if res.Code != http.StatusBadGateway {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+	if got := res.Body.String(); got != "session closed\n" {
+		t.Fatalf("body = %q, want %q", got, "session closed\\n")
 	}
 }
 
