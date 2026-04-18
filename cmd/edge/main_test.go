@@ -314,6 +314,7 @@ func TestNewHTTPSHandlerDispatch(t *testing.T) {
 			grpcCalls++
 			w.WriteHeader(http.StatusNoContent)
 		}),
+		nil,
 	)
 
 	grpcReq := httptest.NewRequest(http.MethodPost, "https://edge.example.com/tunnel.v1.TunnelService/Connect", nil)
@@ -366,6 +367,111 @@ func TestNewHTTPSHandlerDispatch(t *testing.T) {
 	}
 	if publicCalls != 1 {
 		t.Fatalf("publicCalls = %d, want %d", publicCalls, 1)
+	}
+}
+
+func TestNewHTTPSHandlerRoutesPprofOnEdgeDomain(t *testing.T) {
+	t.Parallel()
+
+	pprofCalls := 0
+	var seenPath string
+	pprof := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pprofCalls++
+		seenPath = r.URL.Path
+		w.WriteHeader(http.StatusTeapot)
+	})
+
+	handler := newHTTPSHandler(
+		"example.com",
+		"edge.example.com",
+		func(host string) bool { return host == "demo.example.com" },
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		pprof,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "https://edge.example.com/pprof/heap", nil)
+	req.Host = "edge.example.com"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusTeapot {
+		t.Fatalf("pprof response code = %d, want %d", res.Code, http.StatusTeapot)
+	}
+	if pprofCalls != 1 {
+		t.Fatalf("pprofCalls = %d, want 1", pprofCalls)
+	}
+	if seenPath != "/pprof/heap" {
+		t.Fatalf("pprof saw path = %q, want %q", seenPath, "/pprof/heap")
+	}
+
+	// On the public domain, /pprof must not reach the pprof handler.
+	publicReq := httptest.NewRequest(http.MethodGet, "https://demo.example.com/pprof/heap", nil)
+	publicReq.Host = "demo.example.com"
+	publicRes := httptest.NewRecorder()
+	handler.ServeHTTP(publicRes, publicReq)
+	if pprofCalls != 1 {
+		t.Fatalf("pprofCalls after public request = %d, want 1", pprofCalls)
+	}
+}
+
+func TestNewHTTPSHandlerPprofDisabledWhenNil(t *testing.T) {
+	t.Parallel()
+
+	handler := newHTTPSHandler(
+		"example.com",
+		"edge.example.com",
+		func(host string) bool { return false },
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		nil,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "https://edge.example.com/pprof/heap", nil)
+	req.Host = "edge.example.com"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusNotFound)
+	}
+}
+
+func TestNewPprofHandlerRewritesAndServesIndex(t *testing.T) {
+	t.Parallel()
+
+	handler := newPprofHandler()
+
+	for _, path := range []string{"/pprof", "/pprof/", "/pprof/heap", "/pprof/cmdline"} {
+		req := httptest.NewRequest(http.MethodGet, "https://edge.example.com"+path, nil)
+		req.Host = "edge.example.com"
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("path %q: code = %d, want %d", path, res.Code, http.StatusOK)
+		}
+	}
+}
+
+func TestIsPprofPath(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]bool{
+		"/pprof":          true,
+		"/pprof/":         true,
+		"/pprof/heap":     true,
+		"/pprof/goodbye":  true,
+		"/pproffoo":       false,
+		"/":               false,
+		"/debug/pprof/":   false,
+		"/pprof/../etc":   true, // still under the prefix; pprof handler can 404 it
+	}
+	for path, want := range cases {
+		if got := isPprofPath(path); got != want {
+			t.Fatalf("isPprofPath(%q) = %v, want %v", path, got, want)
+		}
 	}
 }
 

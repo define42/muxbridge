@@ -180,6 +180,32 @@ bin/edge \
   --tls-key-file /etc/ssl/example/privkey.pem
 ```
 
+## Profiling
+
+When the edge is started with `--debug` (or `MUXBRIDGE_DEBUG=1`), the standard `net/http/pprof` handlers are exposed on the edge domain under `/pprof/`:
+
+```text
+https://edge.<public-domain>/pprof/          # index of available profiles
+https://edge.<public-domain>/pprof/heap
+https://edge.<public-domain>/pprof/goroutine
+https://edge.<public-domain>/pprof/allocs
+https://edge.<public-domain>/pprof/profile   # 30 s CPU profile by default
+https://edge.<public-domain>/pprof/trace
+https://edge.<public-domain>/pprof/cmdline
+https://edge.<public-domain>/pprof/symbol
+```
+
+Example:
+
+```bash
+go tool pprof https://edge.example.com/pprof/heap
+curl "https://edge.example.com/pprof/goroutine?debug=2"
+```
+
+The endpoints are only mounted when debug mode is enabled and return `404` otherwise.
+
+**Security**: pprof exposes heap contents, goroutine stacks, and lets callers trigger long-running CPU profiles or execution traces. The edge domain has no built-in authentication, so leaving `--debug` on in production makes this data world-readable. Restrict access at the network layer (firewall, IP allowlist, reverse proxy with auth) before enabling debug mode on a public deployment.
+
 ## Demo Client
 
 The demo client serves a small HTTP app locally and connects it to the edge.

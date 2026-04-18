@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -89,6 +90,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 	grpcServer := newEdgeGRPCServer()
 	tunnelpb.RegisterTunnelServiceServer(grpcServer, srv)
 
+	var pprofHandler http.Handler
+	if cfg.Debug {
+		pprofHandler = newPprofHandler()
+	}
+
 	httpsHandler := newHTTPSHandler(
 		cfg.PublicDomain,
 		cfg.EdgeDomain,
@@ -96,6 +102,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 		newStatusHandler(startedAt, time.Now),
 		srv,
 		grpcServer,
+		pprofHandler,
 	)
 	tlsAssets, err := edgeTLSAssetsFor(cfg)
 	if err != nil {
@@ -297,13 +304,15 @@ func newStatusHandler(startedAt time.Time, now func() time.Time) http.Handler {
 	})
 }
 
-func newHTTPSHandler(publicDomain, edgeDomain string, isPublicHost func(string) bool, statusHandler, publicHandler http.Handler, grpcHandler http.Handler) http.Handler {
+func newHTTPSHandler(publicDomain, edgeDomain string, isPublicHost func(string) bool, statusHandler, publicHandler http.Handler, grpcHandler http.Handler, pprofHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostnames.NormalizeHost(r.Host)
 
 		switch {
 		case host == edgeDomain && isGRPCRequest(r):
 			grpcHandler.ServeHTTP(w, r)
+		case host == edgeDomain && pprofHandler != nil && isPprofPath(r.URL.Path):
+			pprofHandler.ServeHTTP(w, r)
 		case host == edgeDomain:
 			http.NotFound(w, r)
 		case host == publicDomain:
@@ -313,6 +322,32 @@ func newHTTPSHandler(publicDomain, edgeDomain string, isPublicHost func(string) 
 		default:
 			http.NotFound(w, r)
 		}
+	})
+}
+
+func isPprofPath(path string) bool {
+	return path == "/pprof" || path == "/pprof/" || strings.HasPrefix(path, "/pprof/")
+}
+
+// newPprofHandler exposes the standard net/http/pprof handlers under /pprof.
+// The pprof.Index handler routes by stripping "/debug/pprof/", so incoming
+// paths are rewritten into that namespace before delegation.
+func newPprofHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rewritten := r.Clone(r.Context())
+		suffix := strings.TrimPrefix(r.URL.Path, "/pprof")
+		if suffix == "" {
+			suffix = "/"
+		}
+		rewritten.URL.Path = "/debug/pprof" + suffix
+		mux.ServeHTTP(w, rewritten)
 	})
 }
 
