@@ -5,7 +5,7 @@ BENCH_GUARDRAILS := HandleClientFrame|DispatchWSInbound
 
 .PHONY: all proto clean test bench lint
 
-all: $(BIN_DIR)/edge $(BIN_DIR)/demo-client
+all: $(BIN_DIR)/edge $(BIN_DIR)/demo-client $(BIN_DIR)/perf-client
 
 proto: $(PROTO_GEN)
 
@@ -24,6 +24,10 @@ $(BIN_DIR)/edge: $(PROTO_GEN)
 $(BIN_DIR)/demo-client: $(PROTO_GEN)
 	mkdir -p $(BIN_DIR)
 	go build -o $@ ./cmd/demo-client
+
+$(BIN_DIR)/perf-client: $(PROTO_GEN)
+	mkdir -p $(BIN_DIR)
+	go build -o $@ ./cmd/perf-client
 
 clean:
 	rm -rf $(BIN_DIR)

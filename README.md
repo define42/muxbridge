@@ -38,7 +38,7 @@ Cloudflare Tunnel requires you to install and run a separate `cloudflared` proce
 
 ## Build
 
-Build both binaries with:
+Build the binaries with:
 
 ```bash
 make -f makefile all
@@ -48,12 +48,14 @@ This produces:
 
 - `bin/edge`
 - `bin/demo-client`
+- `bin/perf-client`
 
 You can also build directly with Go:
 
 ```bash
 go build -o bin/edge ./cmd/edge
 go build -o bin/demo-client ./cmd/demo-client
+go build -o bin/perf-client ./cmd/perf-client
 ```
 
 ## Test
@@ -269,9 +271,106 @@ https://demo.example.com/ws-demo
 https://demo.example.com/sse-demo
 ```
 
+## Performance Client
+
+The perf client serves a purpose-built benchmark app locally through the tunnel and then drives load against the real public hostname. It is meant for end-to-end edge+tunnel+backend measurements rather than synthetic localhost-only benchmarking.
+
+Routes served by the perf app:
+
+- `/healthz` -> readiness probe used before the load phase starts
+- `/fast` -> small fixed plain-text response
+- `/bytes` -> fixed-size binary payload response
+- `/stream` -> chunked streaming response
+
+The load generator keeps a configurable number of workers active for the full test duration. Each worker owns its own HTTP client and keeps traffic on HTTP/1.1 so the test uses real parallel public connections instead of collapsing onto a single HTTP/2 session.
+
+Defaults:
+
+- token: `perf-token`
+- connections: `1000`
+- duration: `30s`
+- scenario: `mixed`
+- edge address: `edge.<public-domain>:443` when `--edge-addr` is not provided
+
+### Scenarios
+
+- `fast` -> every request goes to `/fast`
+- `stream` -> every request goes to `/stream`
+- `mixed` -> weighted mix of `/fast`, `/bytes`, and `/stream`
+
+The default `mixed` scenario is intentionally uneven: it spends most requests on `/fast`, adds a smaller amount of fixed-size `/bytes` traffic, and keeps a small stream workload in the mix. That gives a more realistic blend of short responses, payload-heavy responses, and chunked responses without making the run entirely CPU-bound or entirely bandwidth-bound.
+
+### Flags
+
+```text
+--public-host
+--public-domain
+--edge-addr
+--token
+--connections
+--duration
+--scenario
+--request-timeout
+--ready-timeout
+--debug
+```
+
+### Environment Variables
+
+```text
+MUXBRIDGE_PUBLIC_HOST
+MUXBRIDGE_PUBLIC_DOMAIN
+MUXBRIDGE_EDGE_ADDR
+MUXBRIDGE_CLIENT_TOKEN
+MUXBRIDGE_DEBUG
+```
+
+### Run The Perf Client
+
+With the matching edge credential:
+
+```text
+perf-token=perf
+```
+
+and DNS pointing `perf.example.com` at the edge, run:
+
+```bash
+bin/perf-client \
+  --public-domain example.com \
+  --public-host perf.example.com \
+  --token perf-token \
+  --connections 1000 \
+  --duration 30s \
+  --scenario mixed
+```
+
+The client waits for `https://perf.example.com/healthz` to return `200 OK`, then keeps roughly 1000 HTTP/1.1 public connections active for the configured duration and prints request throughput, response throughput, status counts, and latency percentiles.
+
+The summary includes:
+
+- total requests, successful responses, and request errors
+- response status counts
+- requests per second and bytes per second
+- latency min, average, p50, p95, p99, and max
+
+Example:
+
+```text
+performance test summary
+host: perf.example.com
+scenario: mixed
+connections: 1000
+duration: planned=30s observed=30.017s
+requests: total=48211 success=48211 errors=0
+throughput: req/s=1606.20 bytes/s=12483011.44
+latency: min=3.411ms avg=18.772ms p50=12ms p95=49ms p99=87ms max=214.118ms
+statuses: 200=48211
+```
+
 ### Debug Logging
 
-Both binaries support opt-in debug logging via `--debug` or `MUXBRIDGE_DEBUG=1`.
+The edge, demo client, and perf client all support opt-in debug logging via `--debug` or `MUXBRIDGE_DEBUG=1`.
 
 Example:
 
@@ -283,6 +382,11 @@ MUXBRIDGE_DEBUG=1 bin/edge \
 MUXBRIDGE_DEBUG=1 bin/demo-client \
   --public-domain example.com \
   --token demo-token
+
+MUXBRIDGE_DEBUG=1 bin/perf-client \
+  --public-domain example.com \
+  --public-host perf.example.com \
+  --token perf-token
 ```
 
 ## Minimal End-To-End Example
