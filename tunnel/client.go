@@ -389,9 +389,8 @@ func (c *Client) runSession(ctx context.Context) error {
 
 		case *tunnelpb.ServerFrame_WsData:
 			if ch := getWSInbound(msg.WsData.GetRequestId()); ch != nil {
-				payload := append([]byte(nil), msg.WsData.GetPayload()...)
 				select {
-				case ch <- payload:
+				case ch <- msg.WsData.GetPayload():
 				case <-ctx.Done():
 					return ctx.Err()
 				}

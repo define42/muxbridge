@@ -595,9 +595,8 @@ func (s *Server) handleClientFrame(sess *session, frame *tunnelpb.ClientFrame) {
 		}
 	case *tunnelpb.ClientFrame_ResponseBody:
 		if rs := sess.get(msg.ResponseBody.GetRequestId()); rs != nil {
-			chunk := append([]byte(nil), msg.ResponseBody.GetChunk()...)
 			select {
-			case rs.body <- chunk:
+			case rs.body <- msg.ResponseBody.GetChunk():
 			case <-rs.done:
 			}
 		}
@@ -612,9 +611,8 @@ func (s *Server) handleClientFrame(sess *session, frame *tunnelpb.ClientFrame) {
 		}
 	case *tunnelpb.ClientFrame_WsData:
 		if ws := sess.getWS(msg.WsData.GetRequestId()); ws != nil {
-			payload := append([]byte(nil), msg.WsData.GetPayload()...)
 			select {
-			case ws.fromClient <- payload:
+			case ws.fromClient <- msg.WsData.GetPayload():
 			case <-ws.done:
 			}
 		}
