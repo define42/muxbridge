@@ -1,7 +1,7 @@
 # muxbridge
 [![codecov](https://codecov.io/gh/define42/muxbridge/graph/badge.svg?token=V3CLO9YG7H)](https://codecov.io/gh/define42/muxbridge)
 
-MuxBridge is a self-hosted HTTP tunnel inspired by [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). It lets you securely expose HTTP services running behind NAT or a firewall to the public internet — no inbound firewall rules or port forwarding required.
+MuxBridge is a self-hosted HTTPS tunnel inspired by [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). It lets you securely expose HTTP services running behind NAT or a firewall to the public internet — no inbound firewall rules or port forwarding required.
 
 ## How It Works
 
