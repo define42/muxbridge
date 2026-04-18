@@ -5,11 +5,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -383,10 +385,7 @@ func TestGRPCClientAndServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	if err != nil {
-		t.Fatalf("DialContext error: %v", err)
-	}
+	conn := dialProtoTestClientConn(t, ctx, listener.Addr().String())
 	defer func() {
 		_ = conn.Close()
 	}()
@@ -424,4 +423,33 @@ func TestUnimplementedTunnelServiceServer(t *testing.T) {
 	}
 	callNoArg((UnimplementedTunnelServiceServer{}).mustEmbedUnimplementedTunnelServiceServer)
 	callNoArg((protoTestService{}).mustEmbedUnimplementedTunnelServiceServer)
+}
+
+func dialProtoTestClientConn(t *testing.T, ctx context.Context, target string) *grpc.ClientConn {
+	t.Helper()
+
+	if !strings.Contains(target, "://") {
+		target = "passthrough:///" + target
+	}
+
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	conn.Connect()
+	for {
+		state := conn.GetState()
+		switch state {
+		case connectivity.Ready:
+			return conn
+		case connectivity.Shutdown:
+			_ = conn.Close()
+			t.Fatal("client connection shut down before becoming ready")
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			_ = conn.Close()
+			t.Fatalf("client connection did not become ready from state %s: %v", state, ctx.Err())
+		}
+	}
 }

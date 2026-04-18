@@ -18,6 +18,7 @@ import (
 	"github.com/define42/muxbridge/gen/tunnelpb"
 	"github.com/define42/muxbridge/internal/headers"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -202,7 +203,7 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) runSession(ctx context.Context) error {
-	dialOpts := []grpc.DialOption{grpc.WithBlock()}
+	var dialOpts []grpc.DialOption
 	if c.cfg.Insecure {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	} else {
@@ -214,13 +215,16 @@ func (c *Client) runSession(ctx context.Context) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
 	defer dialCancel()
 	c.debugf("client debug: opening grpc connection edge_addr=%s insecure=%t timeout=%s", c.cfg.EdgeAddr, c.cfg.Insecure, c.cfg.DialTimeout)
-	conn, err := grpc.DialContext(dialCtx, c.cfg.EdgeAddr, dialOpts...)
+	conn, err := grpc.NewClient(c.cfg.EdgeAddr, dialOpts...)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		_ = conn.Close()
 	}()
+	if err := waitForConnReady(dialCtx, conn); err != nil {
+		return err
+	}
 	c.debugf("client debug: grpc connection ready")
 
 	c.setConn(conn)
@@ -406,6 +410,25 @@ func (c *Client) runSession(ctx context.Context) error {
 			}); err != nil {
 				return err
 			}
+		}
+	}
+}
+
+func waitForConnReady(ctx context.Context, conn *grpc.ClientConn) error {
+	conn.Connect()
+	for {
+		state := conn.GetState()
+		switch state {
+		case connectivity.Ready:
+			return nil
+		case connectivity.Shutdown:
+			return errors.New("grpc connection shut down before becoming ready")
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("grpc connection did not become ready from state %s", state)
 		}
 	}
 }

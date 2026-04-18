@@ -100,10 +100,7 @@ func TestClientLogfCloseAndConnHelpers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	if err != nil {
-		t.Fatalf("DialContext error: %v", err)
-	}
+	conn := dialTunnelClientConn(t, ctx, addr)
 
 	client = &Client{closed: true}
 	client.setConn(conn)
@@ -247,10 +244,7 @@ func TestCloseClosesActiveConn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	if err != nil {
-		t.Fatalf("DialContext error: %v", err)
-	}
+	conn := dialTunnelClientConn(t, ctx, addr)
 
 	client := &Client{conn: conn}
 	if err := client.Close(); err != nil {
@@ -665,5 +659,34 @@ func startTunnelGRPCServer(t *testing.T, connect func(tunnelpb.TunnelService_Con
 	return listener.Addr().String(), func() {
 		server.Stop()
 		_ = listener.Close()
+	}
+}
+
+func dialTunnelClientConn(t *testing.T, ctx context.Context, target string) *grpc.ClientConn {
+	t.Helper()
+
+	if !strings.Contains(target, "://") {
+		target = "passthrough:///" + target
+	}
+
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	conn.Connect()
+	for {
+		state := conn.GetState()
+		switch state {
+		case connectivity.Ready:
+			return conn
+		case connectivity.Shutdown:
+			_ = conn.Close()
+			t.Fatal("client connection shut down before becoming ready")
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			_ = conn.Close()
+			t.Fatalf("client connection did not become ready from state %s: %v", state, ctx.Err())
+		}
 	}
 }
