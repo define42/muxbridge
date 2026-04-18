@@ -105,3 +105,36 @@ func TestTunnelResponseWriterWritePropagatesSendError(t *testing.T) {
 		t.Fatalf("sendCalls = %d, want 2", sendCalls)
 	}
 }
+
+func TestTunnelResponseWriterHandlesHeaderFinishAndFailEdges(t *testing.T) {
+	t.Parallel()
+
+	startErr := errors.New("start failed")
+	sendCalls := 0
+	w := newTunnelResponseWriter("req-4", func(frame *tunnelpb.ClientFrame) error {
+		sendCalls++
+		if frame.GetResponseStart() != nil {
+			return startErr
+		}
+		return nil
+	})
+
+	w.WriteHeader(http.StatusAccepted)
+	if _, err := w.Write([]byte("later")); !errors.Is(err, startErr) {
+		t.Fatalf("Write error = %v, want %v", err, startErr)
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatalf("Finish error = %v, want nil", err)
+	}
+	w.WriteHeader(http.StatusTeapot)
+	if sendCalls != 2 {
+		t.Fatalf("sendCalls = %d, want %d", sendCalls, 2)
+	}
+
+	if err := w.Fail(nil); err != nil {
+		t.Fatalf("Fail(nil) error = %v, want nil", err)
+	}
+	if err := w.Fail(errors.New("ignored")); err != nil {
+		t.Fatalf("Fail after Finish error = %v, want nil", err)
+	}
+}

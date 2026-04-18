@@ -595,6 +595,23 @@ func TestNewStatusHandlerShowsUptime(t *testing.T) {
 	}
 }
 
+func TestNewStatusHandlerDefaultsInflightAndClampsNegativeUptime(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, time.April, 18, 12, 0, 1, 0, time.UTC)
+	handler := newStatusHandler(startedAt, func() time.Time {
+		return startedAt.Add(-250 * time.Millisecond)
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if got := res.Body.String(); got != "MuxBridgh active with uptime 0s\ninflight requests: 0/0" {
+		t.Fatalf("body = %q, want clamped uptime with default inflight", got)
+	}
+}
+
 func TestEdgeTLSConfigStaticCertificate(t *testing.T) {
 	t.Parallel()
 
@@ -834,6 +851,32 @@ func TestServeOrDieAllowsServerClosed(t *testing.T) {
 	}, listener)
 }
 
+func TestServeOrDieExitsOnUnexpectedErrorInHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_SERVEORDIE_HELPER_PROCESS") == "1" {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Listen error: %v", err)
+		}
+		defer func() {
+			_ = listener.Close()
+		}()
+
+		serveOrDie("test", func(net.Listener) error {
+			return errors.New("boom")
+		}, listener)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestServeOrDieExitsOnUnexpectedErrorInHelperProcess")
+	cmd.Env = append(os.Environ(), "GO_WANT_SERVEORDIE_HELPER_PROCESS=1")
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Run error = %v, want ExitError", err)
+	}
+}
+
 func TestServeOnceReturnsUnexpectedError(t *testing.T) {
 	t.Parallel()
 
@@ -963,6 +1006,35 @@ func TestEdgeTLSConfigManagedContextCanceled(t *testing.T) {
 	}
 }
 
+func TestRunReturnsManagedTLSErrorWhenContextCanceled(t *testing.T) {
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen HTTP error: %v", err)
+	}
+	defer func() {
+		_ = httpListener.Close()
+	}()
+
+	httpsListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen HTTPS error: %v", err)
+	}
+	defer func() {
+		_ = httpsListener.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = run(ctx, []string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(string) string { return "" }, httpListener, httpsListener)
+	if err == nil {
+		t.Fatal("expected managed TLS error from canceled context")
+	}
+}
+
 func TestRunReturnsServeErrorFromClosedListener(t *testing.T) {
 	tempDir := t.TempDir()
 	certFile := filepath.Join(tempDir, "cert.pem")
@@ -997,6 +1069,12 @@ func TestRunReturnsServeErrorFromClosedListener(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected serve error from closed listener")
 	}
+}
+
+func TestGracefulStopGRPCNil(t *testing.T) {
+	t.Parallel()
+
+	gracefulStopGRPC(nil)
 }
 
 func TestNewServerHelpersUseStreamingSafeTimeouts(t *testing.T) {

@@ -110,6 +110,131 @@ func TestClientLogfCloseAndConnHelpers(t *testing.T) {
 	client.clearConn(conn)
 }
 
+func TestClientDebugLoggingAndWSDispatch(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	client := &Client{
+		logger: log.New(&buf, "", 0),
+		debug:  true,
+	}
+
+	client.debugReceivedFrame(&tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_RequestStart{RequestStart: &tunnelpb.RequestStart{
+			RequestId:  "req-1",
+			Method:     http.MethodGet,
+			Host:       "demo.example.com",
+			Path:       "/ws",
+			RawQuery:   "x=1",
+			RemoteAddr: "127.0.0.1:1234",
+			Headers: []*tunnelpb.Header{
+				{Key: "Connection", Values: []string{"Upgrade"}},
+				{Key: "Upgrade", Values: []string{"websocket"}},
+			},
+		}},
+	})
+	client.debugReceivedFrame(&tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_RequestBody{RequestBody: &tunnelpb.RequestBody{RequestId: "req-1", Chunk: []byte("body")}},
+	})
+	client.debugReceivedFrame(&tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_RequestEnd{RequestEnd: &tunnelpb.RequestEnd{RequestId: "req-1"}},
+	})
+	client.debugReceivedFrame(&tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_CancelRequest{CancelRequest: &tunnelpb.CancelRequest{RequestId: "req-2"}},
+	})
+	client.debugReceivedFrame(&tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_WsData{WsData: &tunnelpb.WebSocketData{RequestId: "req-3", Payload: []byte("ws")}},
+	})
+	client.debugReceivedFrame(&tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_WsClose{WsClose: &tunnelpb.WebSocketClose{RequestId: "req-3"}},
+	})
+	client.debugReceivedFrame(&tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_Ping{Ping: &tunnelpb.Ping{UnixNano: 42}},
+	})
+
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "demo-token"}},
+	})
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseStart{ResponseStart: &tunnelpb.ResponseStart{RequestId: "req-1", StatusCode: http.StatusCreated}},
+	})
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseBody{ResponseBody: &tunnelpb.ResponseBody{RequestId: "req-1", Chunk: []byte("reply")}},
+	})
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseEnd{ResponseEnd: &tunnelpb.ResponseEnd{RequestId: "req-1"}},
+	})
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseError{ResponseError: &tunnelpb.ResponseError{RequestId: "req-2", Message: "boom"}},
+	})
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_WsData{WsData: &tunnelpb.WebSocketData{RequestId: "req-3", Payload: []byte("ws")}},
+	})
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_WsClose{WsClose: &tunnelpb.WebSocketClose{RequestId: "req-3"}},
+	})
+	client.debugSentFrame(&tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Pong{Pong: &tunnelpb.Pong{UnixNano: 42}},
+	})
+
+	out := buf.String()
+	for _, want := range []string{
+		"recv request_start",
+		"websocket=true",
+		"recv request_body",
+		"recv request_end",
+		"recv cancel_request",
+		"recv ws_data",
+		"recv ws_close",
+		"recv ping",
+		"sent register",
+		"sent response_start",
+		"sent response_body",
+		"sent response_end",
+		"sent response_error",
+		"sent ws_data",
+		"sent ws_close",
+		"sent pong",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("debug output missing %q:\n%s", want, out)
+		}
+	}
+
+	ch := make(chan []byte, 1)
+	payload := []byte("payload")
+	if err := dispatchWSInbound(context.Background(), ch, payload); err != nil {
+		t.Fatalf("dispatchWSInbound error: %v", err)
+	}
+	if got := <-ch; string(got) != string(payload) {
+		t.Fatalf("dispatchWSInbound payload = %q, want %q", got, payload)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := dispatchWSInbound(canceledCtx, make(chan []byte), payload); !errors.Is(err, context.Canceled) {
+		t.Fatalf("dispatchWSInbound error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestClientDebugfHonorsFlag(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	client := &Client{logger: log.New(&buf, "", 0)}
+
+	client.debugf("hidden %d", 1)
+	if got := buf.String(); got != "" {
+		t.Fatalf("debug output with debug disabled = %q, want empty", got)
+	}
+
+	client.debug = true
+	client.debugf("shown %d", 2)
+	if got := buf.String(); !strings.Contains(got, "shown 2") {
+		t.Fatalf("debug output = %q, want shown message", got)
+	}
+}
+
 func TestCloseClosesActiveConn(t *testing.T) {
 	t.Parallel()
 

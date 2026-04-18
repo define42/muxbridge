@@ -4,14 +4,37 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/define42/muxbridge/tunnel"
 	"golang.org/x/net/websocket"
 )
+
+type stubDemoTunnelClient struct {
+	runErr    error
+	runCalled bool
+}
+
+func (c *stubDemoTunnelClient) Run(context.Context) error {
+	c.runCalled = true
+	return c.runErr
+}
+
+func resetDemoTunnelHook(t *testing.T) {
+	t.Helper()
+
+	orig := newDemoTunnelClient
+	t.Cleanup(func() {
+		newDemoTunnelClient = orig
+	})
+}
 
 func TestDefaultString(t *testing.T) {
 	t.Parallel()
@@ -265,6 +288,57 @@ func TestRunReturnsConfigAndClientErrors(t *testing.T) {
 	err := run(context.Background(), []string{"--edge-addr", "127.0.0.1:1", "--token", ""}, func(string) string { return "" })
 	if err == nil || !strings.Contains(err.Error(), "token is required") {
 		t.Fatalf("run error = %v, want missing token", err)
+	}
+}
+
+func TestRunSuccessUsesConfiguredTunnelClient(t *testing.T) {
+	resetDemoTunnelHook(t)
+
+	client := &stubDemoTunnelClient{}
+	newDemoTunnelClient = func(cfg tunnel.Config) (demoTunnelClient, error) {
+		if cfg.EdgeAddr != "edge.example.com:443" {
+			t.Fatalf("EdgeAddr = %q, want %q", cfg.EdgeAddr, "edge.example.com:443")
+		}
+		if cfg.Token != "demo-token" {
+			t.Fatalf("Token = %q, want %q", cfg.Token, "demo-token")
+		}
+		if cfg.Handler == nil {
+			t.Fatal("Handler = nil, want demo mux")
+		}
+		if !cfg.Debug {
+			t.Fatal("Debug = false, want true")
+		}
+		return client, nil
+	}
+
+	err := run(context.Background(), []string{
+		"--public-domain", "example.com",
+		"--edge-addr", "edge.example.com:443",
+		"--debug",
+	}, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if !client.runCalled {
+		t.Fatal("tunnel client Run was not called")
+	}
+}
+
+func TestMainRejectsInvalidConfigInHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_DEMO_HELPER_PROCESS") == "1" {
+		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+		_ = os.Setenv("MUXBRIDGE_PUBLIC_DOMAIN", "localhost")
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainRejectsInvalidConfigInHelperProcess")
+	cmd.Env = append(os.Environ(), "GO_WANT_DEMO_HELPER_PROCESS=1")
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Run error = %v, want ExitError", err)
 	}
 }
 

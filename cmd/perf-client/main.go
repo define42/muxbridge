@@ -107,6 +107,22 @@ type loadSummary struct {
 	LatencyHistogram    latencyHistogram
 }
 
+type perfTunnelClient interface {
+	Run(context.Context) error
+	Close() error
+}
+
+var (
+	newPerfTunnelClient = func(cfg tunnel.Config) (perfTunnelClient, error) {
+		return tunnel.New(cfg)
+	}
+	waitForReadyFunc = waitForReady
+	runLoadFunc      = runLoad
+	printSummary     = func(summary string) {
+		fmt.Print(summary)
+	}
+)
+
 func main() {
 	if err := run(context.Background(), os.Args[1:], getenv); err != nil {
 		log.Fatal(err)
@@ -124,7 +140,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 		return err
 	}
 
-	cli, err := tunnel.New(tunnel.Config{
+	cli, err := newPerfTunnelClient(tunnel.Config{
 		EdgeAddr: cfg.EdgeAddr,
 		Token:    cfg.Token,
 		Handler:  newPerfMux(),
@@ -159,7 +175,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 	defer readyCancel()
 
 	readyClient := newPublicClient(cfg.RequestTimeout, nil)
-	if err := waitForReady(readyCtx, cfg.publicBaseURL(), readyClient, defaultReadyPollPeriod, tunnelErrCh); err != nil {
+	if err := waitForReadyFunc(readyCtx, cfg.publicBaseURL(), readyClient, defaultReadyPollPeriod, tunnelErrCh); err != nil {
 		cancel()
 		_ = cli.Close()
 		if tunnelErr := waitForClientExit(tunnelErrCh, 2*time.Second); tunnelErr != nil && cfg.Debug {
@@ -168,7 +184,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 		return fmt.Errorf("public host %s did not become ready: %w", cfg.PublicHost, err)
 	}
 
-	summary, err := runLoad(runCtx, loadRunConfig{
+	summary, err := runLoadFunc(runCtx, loadRunConfig{
 		BaseURL:        cfg.publicBaseURL(),
 		PublicHost:     cfg.PublicHost,
 		Scenario:       scn,
@@ -189,7 +205,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 		return err
 	}
 
-	fmt.Print(summary.String())
+	printSummary(summary.String())
 	return nil
 }
 

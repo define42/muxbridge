@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -418,6 +420,122 @@ func TestServeWebSocketReturnsServiceUnavailableWhenInflightLimitReached(t *test
 
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServerDebugLoggingAndAccessors(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	srv := &Server{
+		logger:           log.New(&buf, "", 0),
+		debug:            true,
+		maxTotalInflight: 512,
+	}
+	srv.totalInflight.Store(7)
+
+	if got := srv.TotalInflight(); got != 7 {
+		t.Fatalf("TotalInflight = %d, want %d", got, 7)
+	}
+	if got := srv.MaxTotalInflight(); got != 512 {
+		t.Fatalf("MaxTotalInflight = %d, want %d", got, 512)
+	}
+
+	sess := &session{id: 42}
+
+	srv.debugSentFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_RequestStart{RequestStart: &tunnelpb.RequestStart{
+			RequestId:  "req-1",
+			Method:     http.MethodGet,
+			Host:       "demo.example.com",
+			Path:       "/hello",
+			RawQuery:   "x=1",
+			RemoteAddr: "203.0.113.1:1234",
+		}},
+	})
+	srv.debugSentFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_RequestBody{RequestBody: &tunnelpb.RequestBody{RequestId: "req-1", Chunk: []byte("body")}},
+	})
+	srv.debugSentFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_RequestEnd{RequestEnd: &tunnelpb.RequestEnd{RequestId: "req-1"}},
+	})
+	srv.debugSentFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_CancelRequest{CancelRequest: &tunnelpb.CancelRequest{RequestId: "req-2"}},
+	})
+	srv.debugSentFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_Ping{Ping: &tunnelpb.Ping{UnixNano: 11}},
+	})
+	srv.debugSentFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_WsData{WsData: &tunnelpb.WebSocketData{RequestId: "ws-1", Payload: []byte("ws")}},
+	})
+	srv.debugSentFrame(sess, &tunnelpb.ServerFrame{
+		Msg: &tunnelpb.ServerFrame_WsClose{WsClose: &tunnelpb.WebSocketClose{RequestId: "ws-1"}},
+	})
+
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Register{Register: &tunnelpb.Register{Token: "demo-token"}},
+	})
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseStart{ResponseStart: &tunnelpb.ResponseStart{RequestId: "req-1", StatusCode: http.StatusCreated}},
+	})
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseBody{ResponseBody: &tunnelpb.ResponseBody{RequestId: "req-1", Chunk: []byte("body")}},
+	})
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseEnd{ResponseEnd: &tunnelpb.ResponseEnd{RequestId: "req-1"}},
+	})
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_ResponseError{ResponseError: &tunnelpb.ResponseError{RequestId: "req-2", Message: "boom"}},
+	})
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_WsData{WsData: &tunnelpb.WebSocketData{RequestId: "ws-1", Payload: []byte("payload")}},
+	})
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_WsClose{WsClose: &tunnelpb.WebSocketClose{RequestId: "ws-1"}},
+	})
+	srv.debugReceivedFrame(sess, &tunnelpb.ClientFrame{
+		Msg: &tunnelpb.ClientFrame_Pong{Pong: &tunnelpb.Pong{UnixNano: time.Now().Add(-time.Millisecond).UnixNano()}},
+	})
+
+	output := buf.String()
+	for _, want := range []string{
+		"sent request_start",
+		"sent request_body",
+		"sent request_end",
+		"sent cancel_request",
+		"sent ping",
+		"sent ws_data",
+		"sent ws_close",
+		"recv register",
+		"recv response_start",
+		"recv response_body",
+		"recv response_end",
+		"recv response_error",
+		"recv ws_data",
+		"recv ws_close",
+		"recv pong",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("debug log output missing %q in %q", want, output)
+		}
+	}
+}
+
+func TestServerDebugfHonorsFlag(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	srv := &Server{logger: log.New(&buf, "", 0)}
+
+	srv.debugf("hidden %d", 1)
+	if got := buf.String(); got != "" {
+		t.Fatalf("debug output with debug disabled = %q, want empty", got)
+	}
+
+	srv.debug = true
+	srv.debugf("shown %d", 2)
+	if got := buf.String(); !strings.Contains(got, "shown 2") {
+		t.Fatalf("debug output = %q, want shown message", got)
 	}
 }
 

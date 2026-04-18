@@ -27,6 +27,14 @@ type demoConfig struct {
 var slowChunkDelay = 500 * time.Millisecond
 var sseTickInterval = time.Second
 
+type demoTunnelClient interface {
+	Run(context.Context) error
+}
+
+var newDemoTunnelClient = func(cfg tunnel.Config) (demoTunnelClient, error) {
+	return tunnel.New(cfg)
+}
+
 func main() {
 	if err := run(context.Background(), os.Args[1:], getenv); err != nil {
 		log.Fatal(err)
@@ -41,7 +49,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 
 	mux := newDemoMux()
 
-	cli, err := tunnel.New(tunnel.Config{
+	cli, err := newDemoTunnelClient(tunnel.Config{
 		EdgeAddr: cfg.EdgeAddr,
 		Token:    cfg.Token,
 		Handler:  mux,
