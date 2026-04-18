@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/define42/muxbridge/internal/hostnames"
@@ -21,16 +22,18 @@ const (
 	debugEnv             = "MUXBRIDGE_DEBUG"
 	dataDirEnv           = "MUXBRIDGH_DATA"
 	dataDirCompatEnv     = "MUXBRIDGE_DATA"
+	maxInflightEnv       = "MUXBRIDGE_MAX_INFLIGHT_PER_SESSION"
 )
 
 type edgeConfig struct {
-	PublicDomain      string
-	EdgeDomain        string
-	ClientCredentials map[string]string
-	TLSCertFile       string
-	TLSKeyFile        string
-	Debug             bool
-	DataDir           string
+	PublicDomain          string
+	EdgeDomain            string
+	ClientCredentials     map[string]string
+	TLSCertFile           string
+	TLSKeyFile            string
+	Debug                 bool
+	DataDir               string
+	MaxInflightPerSession int
 }
 
 func (c edgeConfig) managedHosts() []string {
@@ -92,6 +95,10 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 		tlsKeyFile = strings.TrimSpace(getenv(tlsKeyFileEnv))
 	}
 	dataDir := resolveDataDir(getenv)
+	maxInflightPerSession, err := resolveMaxInflightPerSession(getenv)
+	if err != nil {
+		return edgeConfig{}, err
+	}
 	publicDomain = hostnames.NormalizeDomain(publicDomain)
 	if err := hostnames.ValidateDomain(publicDomain); err != nil {
 		return edgeConfig{}, fmt.Errorf("invalid public domain: %w", err)
@@ -106,13 +113,14 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	}
 
 	return edgeConfig{
-		PublicDomain:      publicDomain,
-		EdgeDomain:        hostnames.Subdomain("edge", publicDomain),
-		ClientCredentials: credentials,
-		TLSCertFile:       tlsCertFile,
-		TLSKeyFile:        tlsKeyFile,
-		Debug:             debug,
-		DataDir:           dataDir,
+		PublicDomain:          publicDomain,
+		EdgeDomain:            hostnames.Subdomain("edge", publicDomain),
+		ClientCredentials:     credentials,
+		TLSCertFile:           tlsCertFile,
+		TLSKeyFile:            tlsKeyFile,
+		Debug:                 debug,
+		DataDir:               dataDir,
+		MaxInflightPerSession: maxInflightPerSession,
 	}, nil
 }
 
@@ -128,6 +136,23 @@ func resolveDataDir(getenv func(string) string) string {
 		return filepath.Join(homeDir, ".local", "share", "muxbridge")
 	}
 	return filepath.Clean("muxbridge-data")
+}
+
+func resolveMaxInflightPerSession(getenv func(string) string) (int, error) {
+	value := strings.TrimSpace(getenv(maxInflightEnv))
+	if value == "" {
+		return 0, nil
+	}
+
+	maxInflight, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", maxInflightEnv, err)
+	}
+	if maxInflight <= 0 {
+		return 0, fmt.Errorf("invalid %s: value must be greater than zero", maxInflightEnv)
+	}
+
+	return maxInflight, nil
 }
 
 func parseCredentials(envValue string, cliValues []string) (map[string]string, error) {

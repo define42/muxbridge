@@ -38,12 +38,14 @@ const (
 	// accommodates large headers and a safety margin without allowing an
 	// abusive client to send arbitrarily large frames.
 	maxGRPCMessageBytes = 4 * 1024 * 1024
+	httpMaxHeaderBytes  = 16 << 10
 
 	// gRPC keepalive tuning detects dead tunnels behind NATs while not being
 	// so aggressive that well-behaved but quiet sessions get torn down.
 	grpcServerKeepaliveTime    = 30 * time.Second
 	grpcServerKeepaliveTimeout = 20 * time.Second
 	grpcClientMinKeepaliveTime = 10 * time.Second
+	publicHTTPSIdleTimeout     = 2 * time.Minute
 )
 
 func main() {
@@ -78,10 +80,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 	startedAt := time.Now()
 
 	srv, err := server.New(server.Config{
-		PublicDomain: cfg.PublicDomain,
-		TokenUsers:   cfg.ClientCredentials,
-		Logger:       log.Default(),
-		Debug:        cfg.Debug,
+		PublicDomain:          cfg.PublicDomain,
+		TokenUsers:            cfg.ClientCredentials,
+		Logger:                log.Default(),
+		Debug:                 cfg.Debug,
+		MaxInflightPerSession: cfg.MaxInflightPerSession,
 	})
 	if err != nil {
 		return err
@@ -168,6 +171,7 @@ func newRedirectHTTPServer(handler http.Handler) *http.Server {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
 	}
 }
 
@@ -179,8 +183,9 @@ func newPublicHTTPSServer(handler http.Handler, tlsConfig *tls.Config) *http.Ser
 		// serves long-lived gRPC tunnel streams and proxied streaming
 		// responses, and server-wide deadlines would tear those down even when
 		// the session is healthy.
-		IdleTimeout: 5 * time.Minute,
-		TLSConfig:   tlsConfig,
+		IdleTimeout:    publicHTTPSIdleTimeout,
+		MaxHeaderBytes: httpMaxHeaderBytes,
+		TLSConfig:      tlsConfig,
 	}
 }
 

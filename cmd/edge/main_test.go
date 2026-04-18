@@ -142,6 +142,44 @@ func TestLoadConfigReadsDataDirCompatEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsMaxInflightPerSessionFromEnv(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(key string) string {
+		if key == maxInflightEnv {
+			return "256"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+
+	if cfg.MaxInflightPerSession != 256 {
+		t.Fatalf("MaxInflightPerSession = %d, want %d", cfg.MaxInflightPerSession, 256)
+	}
+}
+
+func TestLoadConfigRejectsInvalidMaxInflightPerSessionEnv(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(key string) string {
+		if key == maxInflightEnv {
+			return "0"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("expected invalid max inflight error")
+	}
+}
+
 func TestLoadConfigRejectsIncompleteStaticTLSConfig(t *testing.T) {
 	t.Parallel()
 
@@ -937,6 +975,9 @@ func TestNewServerHelpersUseStreamingSafeTimeouts(t *testing.T) {
 	if httpServer.IdleTimeout != 30*time.Second {
 		t.Fatalf("http IdleTimeout = %v, want %v", httpServer.IdleTimeout, 30*time.Second)
 	}
+	if httpServer.MaxHeaderBytes != httpMaxHeaderBytes {
+		t.Fatalf("http MaxHeaderBytes = %d, want %d", httpServer.MaxHeaderBytes, httpMaxHeaderBytes)
+	}
 
 	tlsConfig := &tls.Config{}
 	httpsServer := newPublicHTTPSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), tlsConfig)
@@ -949,8 +990,11 @@ func TestNewServerHelpersUseStreamingSafeTimeouts(t *testing.T) {
 	if httpsServer.WriteTimeout != 0 {
 		t.Fatalf("https WriteTimeout = %v, want 0", httpsServer.WriteTimeout)
 	}
-	if httpsServer.IdleTimeout != 5*time.Minute {
-		t.Fatalf("https IdleTimeout = %v, want %v", httpsServer.IdleTimeout, 5*time.Minute)
+	if httpsServer.IdleTimeout != publicHTTPSIdleTimeout {
+		t.Fatalf("https IdleTimeout = %v, want %v", httpsServer.IdleTimeout, publicHTTPSIdleTimeout)
+	}
+	if httpsServer.MaxHeaderBytes != httpMaxHeaderBytes {
+		t.Fatalf("https MaxHeaderBytes = %d, want %d", httpsServer.MaxHeaderBytes, httpMaxHeaderBytes)
 	}
 	if httpsServer.TLSConfig != tlsConfig {
 		t.Fatal("https TLSConfig pointer was not preserved")

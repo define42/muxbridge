@@ -33,6 +33,13 @@ var (
 // the same tunnel session.
 const wsWriteTimeout = 30 * time.Second
 
+const (
+	defaultMaxInflightPerSession = 128
+	sessionOutboundQueueDepth    = 16
+	responseBodyQueueDepth       = 4
+	wsInboundQueueDepth          = 4
+)
+
 type Config struct {
 	PublicDomain string
 	TokenUsers   map[string]string
@@ -40,9 +47,10 @@ type Config struct {
 	// otherwise idle tunnel session. The client answers with Pong, which keeps
 	// the stream active through load balancers and other idle-connection
 	// middleboxes. Defaults to 10 seconds when not set.
-	HeartbeatInterval time.Duration
-	Logger            *log.Logger
-	Debug             bool
+	HeartbeatInterval     time.Duration
+	Logger                *log.Logger
+	Debug                 bool
+	MaxInflightPerSession int
 }
 
 type Server struct {
@@ -54,6 +62,7 @@ type Server struct {
 	heartbeat    time.Duration
 	logger       *log.Logger
 	debug        bool
+	maxInflight  int
 
 	mu            sync.RWMutex
 	sessions      map[string]*session
@@ -100,6 +109,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 10 * time.Second
 	}
+	if cfg.MaxInflightPerSession <= 0 {
+		cfg.MaxInflightPerSession = defaultMaxInflightPerSession
+	}
 
 	tokenUsers := make(map[string]string, len(cfg.TokenUsers))
 	publicHosts := make(map[string]struct{}, len(cfg.TokenUsers))
@@ -133,6 +145,7 @@ func New(cfg Config) (*Server, error) {
 		heartbeat:    cfg.HeartbeatInterval,
 		logger:       cfg.Logger,
 		debug:        cfg.Debug,
+		maxInflight:  cfg.MaxInflightPerSession,
 		sessions:     make(map[string]*session),
 	}, nil
 }
@@ -189,8 +202,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID := strconv.FormatUint(s.nextRequestID.Add(1), 10)
-	state := newResponseState()
-	sess.put(requestID, state)
+	state, ok := sess.tryStart(requestID, s.maxInflight)
+	if !ok {
+		http.Error(w, "too many in-flight requests for tunnel session", http.StatusServiceUnavailable)
+		return
+	}
 	defer sess.del(requestID)
 
 	if err := s.forwardRequest(r, sess, requestID); err != nil {
@@ -279,12 +295,15 @@ writeHeaders:
 func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *session) {
 	requestID := strconv.FormatUint(s.nextRequestID.Add(1), 10)
 
-	state := newResponseState()
-	sess.put(requestID, state)
+	state, ok := sess.tryStart(requestID, s.maxInflight)
+	if !ok {
+		http.Error(w, "too many in-flight requests for tunnel session", http.StatusServiceUnavailable)
+		return
+	}
 	defer sess.del(requestID)
 
 	ws := &wsState{
-		fromClient: make(chan []byte, 16),
+		fromClient: make(chan []byte, wsInboundQueueDepth),
 		done:       make(chan struct{}),
 	}
 	sess.putWS(requestID, ws)
@@ -446,7 +465,7 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 		id:         s.nextSessionID.Add(1),
 		publicHost: publicHost,
 		username:   username,
-		outbound:   make(chan *tunnelpb.ServerFrame, 64),
+		outbound:   make(chan *tunnelpb.ServerFrame, sessionOutboundQueueDepth),
 		done:       make(chan struct{}),
 		inflight:   make(map[string]*responseState),
 		wsMap:      make(map[string]*wsState),
@@ -676,7 +695,7 @@ func schemeOf(r *http.Request) string {
 func newResponseState() *responseState {
 	return &responseState{
 		start: make(chan *tunnelpb.ResponseStart, 1),
-		body:  make(chan []byte, 16),
+		body:  make(chan []byte, responseBodyQueueDepth),
 		done:  make(chan struct{}),
 		err:   make(chan error, 1),
 	}
@@ -720,6 +739,19 @@ func (s *session) put(id string, rs *responseState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.inflight[id] = rs
+}
+
+func (s *session) tryStart(id string, maxInflight int) (*responseState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if maxInflight > 0 && len(s.inflight) >= maxInflight {
+		return nil, false
+	}
+
+	rs := newResponseState()
+	s.inflight[id] = rs
+	return rs, true
 }
 
 func (s *session) get(id string) *responseState {

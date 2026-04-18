@@ -255,6 +255,29 @@ func TestConnectSendsHeartbeatOnIdleSession(t *testing.T) {
 	}
 }
 
+func TestNewUsesMaxInflightDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	if srv.maxInflight != defaultMaxInflightPerSession {
+		t.Fatalf("default maxInflight = %d, want %d", srv.maxInflight, defaultMaxInflightPerSession)
+	}
+
+	limited, err := New(Config{
+		PublicDomain:          "example.com",
+		MaxInflightPerSession: 7,
+		TokenUsers: map[string]string{
+			"demo-token": "demo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	if limited.maxInflight != 7 {
+		t.Fatalf("configured maxInflight = %d, want %d", limited.maxInflight, 7)
+	}
+}
+
 func TestServeHTTPRoutesNormalizedKnownHost(t *testing.T) {
 	t.Parallel()
 
@@ -318,6 +341,65 @@ func TestServeHTTPRejectsUnknownPublicHost(t *testing.T) {
 
 	if res.Code != http.StatusNotFound {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusNotFound)
+	}
+}
+
+func TestServeHTTPReturnsServiceUnavailableWhenInflightLimitReached(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	srv.maxInflight = 1
+
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 1),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	sess.put("existing", newResponseState())
+	srv.putSession(sess)
+
+	req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/blocked", nil)
+	req.Host = "demo.example.com"
+	res := httptest.NewRecorder()
+
+	srv.ServeHTTP(res, req)
+
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+	if len(sess.inflight) != 1 {
+		t.Fatalf("inflight size = %d, want %d", len(sess.inflight), 1)
+	}
+}
+
+func TestServeWebSocketReturnsServiceUnavailableWhenInflightLimitReached(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+	srv.maxInflight = 1
+
+	sess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 1),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+		wsMap:      make(map[string]*wsState),
+	}
+	sess.put("existing", newResponseState())
+	srv.putSession(sess)
+
+	req := httptest.NewRequest(http.MethodGet, "https://demo.example.com/ws", nil)
+	req.Host = "demo.example.com"
+	req.Header.Set("Upgrade", "websocket")
+	res := httptest.NewRecorder()
+
+	srv.ServeHTTP(res, req)
+
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusServiceUnavailable)
 	}
 }
 
