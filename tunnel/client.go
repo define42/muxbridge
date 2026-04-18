@@ -389,10 +389,8 @@ func (c *Client) runSession(ctx context.Context) error {
 
 		case *tunnelpb.ServerFrame_WsData:
 			if ch := getWSInbound(msg.WsData.GetRequestId()); ch != nil {
-				select {
-				case ch <- msg.WsData.GetPayload():
-				case <-ctx.Done():
-					return ctx.Err()
+				if err := dispatchWSInbound(ctx, ch, msg.WsData.GetPayload()); err != nil {
+					return err
 				}
 			}
 
@@ -562,6 +560,15 @@ func (c *Client) handleWebSocket(
 			c.debugf("client debug: websocket context done request_id=%s err=%v", requestID, ctx.Err())
 			return
 		}
+	}
+}
+
+func dispatchWSInbound(ctx context.Context, ch chan<- []byte, payload []byte) error {
+	select {
+	case ch <- payload:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
