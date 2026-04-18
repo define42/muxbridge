@@ -439,12 +439,30 @@ func TestNewHTTPSHandlerPprofDisabledWhenNil(t *testing.T) {
 	}
 }
 
+func TestNewPprofHandlerRedirectsRootToTrailingSlash(t *testing.T) {
+	t.Parallel()
+
+	handler := newPprofHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "https://edge.example.com/pprof?debug=1", nil)
+	req.Host = "edge.example.com"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusPermanentRedirect {
+		t.Fatalf("code = %d, want %d", res.Code, http.StatusPermanentRedirect)
+	}
+	if got := res.Header().Get("Location"); got != "https://edge.example.com/pprof/?debug=1" {
+		t.Fatalf("Location = %q, want %q", got, "https://edge.example.com/pprof/?debug=1")
+	}
+}
+
 func TestNewPprofHandlerRewritesAndServesIndex(t *testing.T) {
 	t.Parallel()
 
 	handler := newPprofHandler()
 
-	for _, path := range []string{"/pprof", "/pprof/", "/pprof/heap", "/pprof/cmdline"} {
+	for _, path := range []string{"/pprof/", "/pprof/heap", "/pprof/cmdline"} {
 		req := httptest.NewRequest(http.MethodGet, "https://edge.example.com"+path, nil)
 		req.Host = "edge.example.com"
 		res := httptest.NewRecorder()
@@ -459,14 +477,14 @@ func TestIsPprofPath(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]bool{
-		"/pprof":          true,
-		"/pprof/":         true,
-		"/pprof/heap":     true,
-		"/pprof/goodbye":  true,
-		"/pproffoo":       false,
-		"/":               false,
-		"/debug/pprof/":   false,
-		"/pprof/../etc":   true, // still under the prefix; pprof handler can 404 it
+		"/pprof":         true,
+		"/pprof/":        true,
+		"/pprof/heap":    true,
+		"/pprof/goodbye": true,
+		"/pproffoo":      false,
+		"/":              false,
+		"/debug/pprof/":  false,
+		"/pprof/../etc":  true, // still under the prefix; pprof handler can 404 it
 	}
 	for path, want := range cases {
 		if got := isPprofPath(path); got != want {

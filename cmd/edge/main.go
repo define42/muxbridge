@@ -341,6 +341,13 @@ func newPprofHandler() http.Handler {
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pprof" {
+			target := *r.URL
+			target.Path = "/pprof/"
+			http.Redirect(w, r, target.String(), http.StatusPermanentRedirect)
+			return
+		}
+
 		rewritten := r.Clone(r.Context())
 		suffix := strings.TrimPrefix(r.URL.Path, "/pprof")
 		if suffix == "" {
