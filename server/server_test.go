@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,6 +277,23 @@ func TestNewUsesMaxInflightDefaultsAndOverrides(t *testing.T) {
 	if limited.maxInflight != 7 {
 		t.Fatalf("configured maxInflight = %d, want %d", limited.maxInflight, 7)
 	}
+	if limited.maxTotalInflight != defaultMaxTotalInflight {
+		t.Fatalf("default maxTotalInflight = %d, want %d", limited.maxTotalInflight, defaultMaxTotalInflight)
+	}
+
+	totalLimited, err := New(Config{
+		PublicDomain:     "example.com",
+		MaxTotalInflight: 11,
+		TokenUsers: map[string]string{
+			"demo-token": "demo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	if totalLimited.maxTotalInflight != 11 {
+		t.Fatalf("configured maxTotalInflight = %d, want %d", totalLimited.maxTotalInflight, 11)
+	}
 }
 
 func TestServeHTTPRoutesNormalizedKnownHost(t *testing.T) {
@@ -400,6 +418,102 @@ func TestServeWebSocketReturnsServiceUnavailableWhenInflightLimitReached(t *test
 
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("response code = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServeHTTPReturnsServiceUnavailableWhenTotalInflightLimitReached(t *testing.T) {
+	t.Parallel()
+
+	srv, err := New(Config{
+		PublicDomain:     "example.com",
+		MaxTotalInflight: 1,
+		TokenUsers: map[string]string{
+			"demo-token":  "demo",
+			"admin-token": "admin",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	demoSess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 1),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	adminSess := &session{
+		publicHost: "admin.example.com",
+		username:   "admin",
+		outbound:   make(chan *tunnelpb.ServerFrame, 1),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	srv.putSession(demoSess)
+	srv.putSession(adminSess)
+
+	state, limit := srv.tryStartRequest(demoSess, "existing")
+	if state == nil || limit != inflightLimitNone {
+		t.Fatalf("tryStartRequest = (%v, %v), want admitted request", state, limit)
+	}
+	defer srv.finishRequest(demoSess, "existing")
+
+	req := httptest.NewRequest(http.MethodGet, "https://admin.example.com/blocked", nil)
+	req.Host = "admin.example.com"
+	res := httptest.NewRecorder()
+
+	srv.ServeHTTP(res, req)
+
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("response code = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+	if got := strings.TrimSpace(res.Body.String()); got != "too many total in-flight requests on edge" {
+		t.Fatalf("body = %q, want total inflight message", got)
+	}
+}
+
+func TestFinishRequestReleasesGlobalInflightSlot(t *testing.T) {
+	t.Parallel()
+
+	srv, err := New(Config{
+		PublicDomain:     "example.com",
+		MaxTotalInflight: 1,
+		TokenUsers: map[string]string{
+			"demo-token":  "demo",
+			"admin-token": "admin",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	demoSess := &session{
+		publicHost: "demo.example.com",
+		username:   "demo",
+		outbound:   make(chan *tunnelpb.ServerFrame, 1),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+	adminSess := &session{
+		publicHost: "admin.example.com",
+		username:   "admin",
+		outbound:   make(chan *tunnelpb.ServerFrame, 1),
+		done:       make(chan struct{}),
+		inflight:   make(map[string]*responseState),
+	}
+
+	if state, limit := srv.tryStartRequest(demoSess, "a"); state == nil || limit != inflightLimitNone {
+		t.Fatalf("first tryStartRequest = (%v, %v), want admitted request", state, limit)
+	}
+	if state, limit := srv.tryStartRequest(adminSess, "b"); state != nil || limit != inflightLimitTotal {
+		t.Fatalf("second tryStartRequest = (%v, %v), want total inflight rejection", state, limit)
+	}
+
+	srv.finishRequest(demoSess, "a")
+
+	if state, limit := srv.tryStartRequest(adminSess, "b"); state == nil || limit != inflightLimitNone {
+		t.Fatalf("third tryStartRequest = (%v, %v), want admitted request after release", state, limit)
 	}
 }
 

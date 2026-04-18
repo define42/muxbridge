@@ -23,6 +23,7 @@ const (
 	dataDirEnv           = "MUXBRIDGH_DATA"
 	dataDirCompatEnv     = "MUXBRIDGE_DATA"
 	maxInflightEnv       = "MUXBRIDGE_MAX_INFLIGHT_PER_SESSION"
+	maxTotalInflightEnv  = "MUXBRIDGE_MAX_TOTAL_INFLIGHT"
 )
 
 type edgeConfig struct {
@@ -34,6 +35,7 @@ type edgeConfig struct {
 	Debug                 bool
 	DataDir               string
 	MaxInflightPerSession int
+	MaxTotalInflight      int
 }
 
 func (c edgeConfig) managedHosts() []string {
@@ -99,6 +101,10 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	if err != nil {
 		return edgeConfig{}, err
 	}
+	maxTotalInflight, err := resolveMaxTotalInflight(getenv)
+	if err != nil {
+		return edgeConfig{}, err
+	}
 	publicDomain = hostnames.NormalizeDomain(publicDomain)
 	if err := hostnames.ValidateDomain(publicDomain); err != nil {
 		return edgeConfig{}, fmt.Errorf("invalid public domain: %w", err)
@@ -121,6 +127,7 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 		Debug:                 debug,
 		DataDir:               dataDir,
 		MaxInflightPerSession: maxInflightPerSession,
+		MaxTotalInflight:      maxTotalInflight,
 	}, nil
 }
 
@@ -139,20 +146,28 @@ func resolveDataDir(getenv func(string) string) string {
 }
 
 func resolveMaxInflightPerSession(getenv func(string) string) (int, error) {
-	value := strings.TrimSpace(getenv(maxInflightEnv))
+	return resolvePositiveEnvInt(getenv, maxInflightEnv)
+}
+
+func resolveMaxTotalInflight(getenv func(string) string) (int, error) {
+	return resolvePositiveEnvInt(getenv, maxTotalInflightEnv)
+}
+
+func resolvePositiveEnvInt(getenv func(string) string, key string) (int, error) {
+	value := strings.TrimSpace(getenv(key))
 	if value == "" {
 		return 0, nil
 	}
 
-	maxInflight, err := strconv.Atoi(value)
+	resolved, err := strconv.Atoi(value)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", maxInflightEnv, err)
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
 	}
-	if maxInflight <= 0 {
-		return 0, fmt.Errorf("invalid %s: value must be greater than zero", maxInflightEnv)
+	if resolved <= 0 {
+		return 0, fmt.Errorf("invalid %s: value must be greater than zero", key)
 	}
 
-	return maxInflight, nil
+	return resolved, nil
 }
 
 func parseCredentials(envValue string, cliValues []string) (map[string]string, error) {

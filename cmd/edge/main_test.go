@@ -180,6 +180,44 @@ func TestLoadConfigRejectsInvalidMaxInflightPerSessionEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsMaxTotalInflightFromEnv(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(key string) string {
+		if key == maxTotalInflightEnv {
+			return "512"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadConfig error: %v", err)
+	}
+
+	if cfg.MaxTotalInflight != 512 {
+		t.Fatalf("MaxTotalInflight = %d, want %d", cfg.MaxTotalInflight, 512)
+	}
+}
+
+func TestLoadConfigRejectsInvalidMaxTotalInflightEnv(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadConfig([]string{
+		"--public-domain", "example.com",
+		"--client-credential", "demo-token=demo",
+	}, func(key string) string {
+		if key == maxTotalInflightEnv {
+			return "banana"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("expected invalid max total inflight error")
+	}
+}
+
 func TestLoadConfigRejectsIncompleteStaticTLSConfig(t *testing.T) {
 	t.Parallel()
 

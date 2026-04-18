@@ -35,9 +35,18 @@ const wsWriteTimeout = 30 * time.Second
 
 const (
 	defaultMaxInflightPerSession = 128
+	defaultMaxTotalInflight      = 512
 	sessionOutboundQueueDepth    = 16
 	responseBodyQueueDepth       = 4
 	wsInboundQueueDepth          = 4
+)
+
+type inflightLimit int
+
+const (
+	inflightLimitNone inflightLimit = iota
+	inflightLimitPerSession
+	inflightLimitTotal
 )
 
 type Config struct {
@@ -51,18 +60,21 @@ type Config struct {
 	Logger                *log.Logger
 	Debug                 bool
 	MaxInflightPerSession int
+	MaxTotalInflight      int
 }
 
 type Server struct {
 	tunnelpb.UnimplementedTunnelServiceServer
 
-	publicDomain string
-	tokenUsers   map[string]string
-	publicHosts  map[string]struct{}
-	heartbeat    time.Duration
-	logger       *log.Logger
-	debug        bool
-	maxInflight  int
+	publicDomain     string
+	tokenUsers       map[string]string
+	publicHosts      map[string]struct{}
+	heartbeat        time.Duration
+	logger           *log.Logger
+	debug            bool
+	maxInflight      int
+	maxTotalInflight int
+	totalInflight    atomic.Int64
 
 	mu            sync.RWMutex
 	sessions      map[string]*session
@@ -112,6 +124,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.MaxInflightPerSession <= 0 {
 		cfg.MaxInflightPerSession = defaultMaxInflightPerSession
 	}
+	if cfg.MaxTotalInflight <= 0 {
+		cfg.MaxTotalInflight = defaultMaxTotalInflight
+	}
 
 	tokenUsers := make(map[string]string, len(cfg.TokenUsers))
 	publicHosts := make(map[string]struct{}, len(cfg.TokenUsers))
@@ -139,14 +154,15 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		publicDomain: publicDomain,
-		tokenUsers:   tokenUsers,
-		publicHosts:  publicHosts,
-		heartbeat:    cfg.HeartbeatInterval,
-		logger:       cfg.Logger,
-		debug:        cfg.Debug,
-		maxInflight:  cfg.MaxInflightPerSession,
-		sessions:     make(map[string]*session),
+		publicDomain:     publicDomain,
+		tokenUsers:       tokenUsers,
+		publicHosts:      publicHosts,
+		heartbeat:        cfg.HeartbeatInterval,
+		logger:           cfg.Logger,
+		debug:            cfg.Debug,
+		maxInflight:      cfg.MaxInflightPerSession,
+		maxTotalInflight: cfg.MaxTotalInflight,
+		sessions:         make(map[string]*session),
 	}, nil
 }
 
@@ -202,12 +218,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID := strconv.FormatUint(s.nextRequestID.Add(1), 10)
-	state, ok := sess.tryStart(requestID, s.maxInflight)
-	if !ok {
-		http.Error(w, "too many in-flight requests for tunnel session", http.StatusServiceUnavailable)
+	state, limit := s.tryStartRequest(sess, requestID)
+	if state == nil {
+		http.Error(w, s.inflightLimitMessage(limit), http.StatusServiceUnavailable)
 		return
 	}
-	defer sess.del(requestID)
+	defer s.finishRequest(sess, requestID)
 
 	if err := s.forwardRequest(r, sess, requestID); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, r.Context().Err()) {
@@ -295,12 +311,12 @@ writeHeaders:
 func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, sess *session) {
 	requestID := strconv.FormatUint(s.nextRequestID.Add(1), 10)
 
-	state, ok := sess.tryStart(requestID, s.maxInflight)
-	if !ok {
-		http.Error(w, "too many in-flight requests for tunnel session", http.StatusServiceUnavailable)
+	state, limit := s.tryStartRequest(sess, requestID)
+	if state == nil {
+		http.Error(w, s.inflightLimitMessage(limit), http.StatusServiceUnavailable)
 		return
 	}
-	defer sess.del(requestID)
+	defer s.finishRequest(sess, requestID)
 
 	ws := &wsState{
 		fromClient: make(chan []byte, wsInboundQueueDepth),
@@ -537,7 +553,7 @@ func (s *Server) Connect(stream tunnelpb.TunnelService_ConnectServer) error {
 	if recvErr != nil {
 		shutdownErr = recvErr
 	}
-	sess.shutdown(shutdownErr)
+	s.releaseGlobalSlots(sess.shutdown(shutdownErr))
 	s.debugf("edge debug: session=%d closing user=%s host=%s peer=%s recv_err=%v", sess.id, sess.username, sess.publicHost, peerAddr, recvErr)
 
 	if err := <-sendErr; err != nil && !errors.Is(err, context.Canceled) {
@@ -701,6 +717,59 @@ func newResponseState() *responseState {
 	}
 }
 
+func (s *Server) tryStartRequest(sess *session, id string) (*responseState, inflightLimit) {
+	if !s.tryReserveGlobalSlot() {
+		return nil, inflightLimitTotal
+	}
+
+	rs, ok := sess.tryStart(id, s.maxInflight)
+	if !ok {
+		s.releaseGlobalSlots(1)
+		return nil, inflightLimitPerSession
+	}
+
+	return rs, inflightLimitNone
+}
+
+func (s *Server) finishRequest(sess *session, id string) {
+	if sess.del(id) {
+		s.releaseGlobalSlots(1)
+	}
+}
+
+func (s *Server) tryReserveGlobalSlot() bool {
+	if s.maxTotalInflight <= 0 {
+		s.totalInflight.Add(1)
+		return true
+	}
+
+	for {
+		current := s.totalInflight.Load()
+		if current >= int64(s.maxTotalInflight) {
+			return false
+		}
+		if s.totalInflight.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func (s *Server) releaseGlobalSlots(count int) {
+	if count <= 0 {
+		return
+	}
+	s.totalInflight.Add(-int64(count))
+}
+
+func (s *Server) inflightLimitMessage(limit inflightLimit) string {
+	switch limit {
+	case inflightLimitTotal:
+		return "too many total in-flight requests on edge"
+	default:
+		return "too many in-flight requests for tunnel session"
+	}
+}
+
 func (s *Server) putSession(sess *session) {
 	var replaced *session
 
@@ -717,7 +786,7 @@ func (s *Server) putSession(sess *session) {
 			sess.publicHost,
 			sess.username,
 		)
-		replaced.shutdown(errSessionReplaced)
+		s.releaseGlobalSlots(replaced.shutdown(errSessionReplaced))
 	}
 }
 
@@ -760,10 +829,14 @@ func (s *session) get(id string) *responseState {
 	return s.inflight[id]
 }
 
-func (s *session) del(id string) {
+func (s *session) del(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.inflight[id]; !ok {
+		return false
+	}
 	delete(s.inflight, id)
+	return true
 }
 
 func (s *session) putWS(id string, ws *wsState) {
@@ -784,9 +857,10 @@ func (s *session) delWS(id string) {
 	delete(s.wsMap, id)
 }
 
-func (s *session) failAll(err error) {
+func (s *session) failAll(err error) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	released := len(s.inflight)
 	for id, rs := range s.inflight {
 		rs.fail(err)
 		delete(s.inflight, id)
@@ -795,13 +869,16 @@ func (s *session) failAll(err error) {
 		ws.close()
 		delete(s.wsMap, id)
 	}
+	return released
 }
 
-func (s *session) shutdown(err error) {
+func (s *session) shutdown(err error) int {
+	released := 0
 	s.once.Do(func() {
 		close(s.done)
-		s.failAll(err)
+		released = s.failAll(err)
 	})
+	return released
 }
 
 func (r *responseState) finish() {

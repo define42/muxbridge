@@ -85,6 +85,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, httpLis
 		Logger:                log.Default(),
 		Debug:                 cfg.Debug,
 		MaxInflightPerSession: cfg.MaxInflightPerSession,
+		MaxTotalInflight:      cfg.MaxTotalInflight,
 	})
 	if err != nil {
 		return err

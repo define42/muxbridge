@@ -146,6 +146,7 @@ MUXBRIDGE_PUBLIC_DOMAIN
 MUXBRIDGE_CLIENT_CREDENTIALS
 MUXBRIDGH_DATA
 MUXBRIDGE_MAX_INFLIGHT_PER_SESSION
+MUXBRIDGE_MAX_TOTAL_INFLIGHT
 MUXBRIDGE_TLS_CERT_FILE
 MUXBRIDGE_TLS_KEY_FILE
 MUXBRIDGE_DEBUG
@@ -162,6 +163,8 @@ Because entries are comma-separated, tokens supplied via `MUXBRIDGE_CLIENT_CREDE
 `MUXBRIDGH_DATA` sets the single persistent data directory used by the edge. When the edge manages TLS with CertMagic, certificates, ACME account data, OCSP cache entries, and lock files are all stored here. `MUXBRIDGE_DATA` is also accepted as a compatibility alias.
 
 `MUXBRIDGE_MAX_INFLIGHT_PER_SESSION` limits how many active proxied requests a single connected client session may hold at once. The default is `128`. When the limit is reached, additional public requests for that tunnel are rejected with `503 Service Unavailable` instead of continuing to grow memory usage.
+
+`MUXBRIDGE_MAX_TOTAL_INFLIGHT` limits the total number of active proxied requests across all connected client sessions. The default is `512`. When the global cap is reached, the edge rejects additional public requests with `503 Service Unavailable` even if an individual client session is still below its per-session limit.
 
 Flag credential entries are appended after environment entries. Credential values are trimmed, usernames are normalized to lowercase before validation, and startup fails on malformed entries, duplicate tokens, duplicate usernames, invalid usernames, usernames with ports such as `demo:443`, or reserved username `edge`.
 
